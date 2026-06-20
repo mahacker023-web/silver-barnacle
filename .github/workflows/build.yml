@@ -16,25 +16,18 @@ jobs:
       - name: Setup MSVC Compiler
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Verify source file exists
-        run: |
-          if (!(Test-Path "MalikLangStudio.cpp")) {
-            Write-Error "MalikLangStudio.cpp not found in repository root!"
-            exit 1
-          }
-          Write-Host "Found MalikLangStudio.cpp - proceeding to compile"
-
-      - name: Compile MalikLang Studio (Logic + UI)
+      - name: Compile MalikLang Studio (Engine + IDE + Preview)
         run: |
           cl.exe /EHsc /std:c++17 /O2 MalikLangStudio.cpp /Fe:MalikLangStudio.exe user32.lib gdi32.lib comctl32.lib comdlg32.lib /link /SUBSYSTEM:WINDOWS
 
-      - name: Verify build output
+      - name: Verify build output exists
         run: |
           if (!(Test-Path "MalikLangStudio.exe")) {
-            Write-Error "Build failed - MalikLangStudio.exe was not created!"
+            Write-Error "Build did not produce MalikLangStudio.exe"
             exit 1
           }
-          Write-Host "Build succeeded - MalikLangStudio.exe created"
+          Write-Host "Build succeeded:"
+          Get-Item MalikLangStudio.exe | Format-List Name, Length
 
       - name: Upload Software Artifact
         uses: actions/upload-artifact@v4
