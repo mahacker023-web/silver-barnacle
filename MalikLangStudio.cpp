@@ -1,6 +1,7 @@
 // =====================================================================
-// MalikLang Studio - Complete Single-File Build
-// Real lexer + parser + interpreter, combined with professional Win32 IDE
+// MalikLang Studio - Complete Single-File Build (v2 - with GUI support)
+// Real lexer + parser + interpreter + GUI builtins (window/button/label/textbox)
+// combined with professional Win32 IDE
 // =====================================================================
 #include <windows.h>
 #include <commdlg.h>
@@ -17,7 +18,8 @@
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
 
-// ====================== LANGUAGE ENGINE ======================
+// ====================== LANGUAGE ENGINE (+ GUI runtime) ======================
+#include <string>
 #include <vector>
 #include <unordered_map>
 #include <memory>
@@ -26,6 +28,10 @@
 #include <sstream>
 #include <stdexcept>
 #include <cmath>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 // ---------------------------------------------------------------------
 // 1. TOKENS
@@ -558,13 +564,157 @@ struct Environment : std::enable_shared_from_this<Environment> {
 // control-flow signal for return statements
 struct ReturnSignal { ValueP value; };
 
+// ---------------------------------------------------------------------
+// 6. GUI RUNTIME (Windows only) - lets .z scripts create real windows,
+//    buttons, labels and textboxes, and route click events back into
+//    the interpreter by calling a named MalikLang function.
+// ---------------------------------------------------------------------
+#ifdef _WIN32
+
+class Interpreter; // fwd decl
+
+struct GuiControl {
+    HWND hwnd;
+    std::string type;        // "button", "label", "textbox"
+    std::string onClickFunc; // name of .z function to call (buttons only)
+};
+
+class GuiRuntime {
+public:
+    HWND hWindow = nullptr;
+    std::unordered_map<int, GuiControl> controls; // keyed by control id
+    int nextId = 2000;
+    Interpreter* interp = nullptr; // set by Interpreter so callbacks can run .z functions
+
+    static GuiRuntime* instance; // single active GUI runtime (one window per script run)
+
+    static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+        GuiRuntime* self = GuiRuntime::instance;
+        switch (msg) {
+            case WM_COMMAND: {
+                if (self) {
+                    int id = LOWORD(wp);
+                    auto it = self->controls.find(id);
+                    if (it != self->controls.end() && !it->second.onClickFunc.empty()) {
+                        self->fireClick(it->second.onClickFunc);
+                    }
+                }
+                break;
+            }
+            case WM_CLOSE:
+                DestroyWindow(hwnd);
+                break;
+            case WM_DESTROY:
+                if (self) self->hWindow = nullptr;
+                break;
+            default:
+                return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        return 0;
+    }
+
+    void createWindow(const std::string& title, int w, int h);
+    int addButton(const std::string& label, int x, int y, int w, int h, const std::string& onClick);
+    int addLabel(const std::string& text, int x, int y, int w, int h);
+    int addTextbox(int x, int y, int w, int h);
+    void setText(int id, const std::string& text);
+    std::string getText(int id);
+    void runMessageLoop();
+    void fireClick(const std::string& funcName); // implemented after Interpreter is defined
+};
+
+GuiRuntime* GuiRuntime::instance = nullptr;
+
+inline void GuiRuntime::createWindow(const std::string& title, int w, int h) {
+    static bool classRegistered = false;
+    std::wstring wtitle(title.begin(), title.end()); // ASCII-safe titles for simplicity
+
+    if (!classRegistered) {
+        WNDCLASSW wc = {0};
+        wc.lpfnWndProc = GuiRuntime::WndProc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.lpszClassName = L"MalikLangAppWindow";
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        RegisterClassW(&wc);
+        classRegistered = true;
+    }
+
+    hWindow = CreateWindowW(L"MalikLangAppWindow", wtitle.c_str(),
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
+        CW_USEDEFAULT, CW_USEDEFAULT, w, h, NULL, NULL, GetModuleHandleW(NULL), NULL);
+
+    GuiRuntime::instance = this;
+}
+
+inline int GuiRuntime::addButton(const std::string& label, int x, int y, int w, int h, const std::string& onClick) {
+    if (!hWindow) throw LangError("No window created yet - call window() first", 0);
+    int id = nextId++;
+    std::wstring wlabel(label.begin(), label.end());
+    HWND btn = CreateWindowW(L"BUTTON", wlabel.c_str(), WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+        x, y, w, h, hWindow, (HMENU)(INT_PTR)id, GetModuleHandleW(NULL), NULL);
+    controls[id] = { btn, "button", onClick };
+    return id;
+}
+
+inline int GuiRuntime::addLabel(const std::string& text, int x, int y, int w, int h) {
+    if (!hWindow) throw LangError("No window created yet - call window() first", 0);
+    int id = nextId++;
+    std::wstring wtext(text.begin(), text.end());
+    HWND lbl = CreateWindowW(L"STATIC", wtext.c_str(), WS_VISIBLE | WS_CHILD | SS_LEFT,
+        x, y, w, h, hWindow, (HMENU)(INT_PTR)id, GetModuleHandleW(NULL), NULL);
+    controls[id] = { lbl, "label", "" };
+    return id;
+}
+
+inline int GuiRuntime::addTextbox(int x, int y, int w, int h) {
+    if (!hWindow) throw LangError("No window created yet - call window() first", 0);
+    int id = nextId++;
+    HWND tb = CreateWindowW(L"EDIT", L"", WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
+        x, y, w, h, hWindow, (HMENU)(INT_PTR)id, GetModuleHandleW(NULL), NULL);
+    controls[id] = { tb, "textbox", "" };
+    return id;
+}
+
+inline void GuiRuntime::setText(int id, const std::string& text) {
+    auto it = controls.find(id);
+    if (it == controls.end()) throw LangError("setText(): invalid control id", 0);
+    std::wstring wtext(text.begin(), text.end());
+    SetWindowTextW(it->second.hwnd, wtext.c_str());
+}
+
+inline std::string GuiRuntime::getText(int id) {
+    auto it = controls.find(id);
+    if (it == controls.end()) throw LangError("getText(): invalid control id", 0);
+    wchar_t buf[2048] = {0};
+    GetWindowTextW(it->second.hwnd, buf, 2047);
+    std::wstring w(buf);
+    return std::string(w.begin(), w.end()); // ASCII-safe for simplicity
+}
+
+inline void GuiRuntime::runMessageLoop() {
+    MSG msg = {0};
+    while (GetMessageW(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+}
+
+#endif // _WIN32
+
 class Interpreter {
 public:
     EnvP globals = std::make_shared<Environment>();
     std::function<void(const std::string&)> onPrint; // hook into UI console
+#ifdef _WIN32
+    GuiRuntime gui;
+#endif
 
     Interpreter() {
         globals->define("PI", Value::Num(3.14159265358979));
+#ifdef _WIN32
+        gui.interp = this;
+#endif
     }
 
     void run(NodeP program) {
@@ -766,6 +916,45 @@ public:
             if (fname == "floor") return Value::Num(std::floor(args.empty() ? 0 : args[0]->num));
             if (fname == "round") return Value::Num(std::round(args.empty() ? 0 : args[0]->num));
 
+#ifdef _WIN32
+            // ---- GUI built-ins (Windows only) ----
+            if (fname == "window") {
+                if (args.size() < 3) throw LangError("window() expects (title, width, height)", n->line);
+                gui.createWindow(args[0]->toDisplay(), (int)args[1]->num, (int)args[2]->num);
+                return Value::Nil();
+            }
+            if (fname == "button") {
+                if (args.size() < 6) throw LangError("button() expects (label, x, y, w, h, onClickFuncName)", n->line);
+                int id = gui.addButton(args[0]->toDisplay(), (int)args[1]->num, (int)args[2]->num,
+                                        (int)args[3]->num, (int)args[4]->num, args[5]->toDisplay());
+                return Value::Num(id);
+            }
+            if (fname == "label") {
+                if (args.size() < 5) throw LangError("label() expects (text, x, y, w, h)", n->line);
+                int id = gui.addLabel(args[0]->toDisplay(), (int)args[1]->num, (int)args[2]->num,
+                                       (int)args[3]->num, (int)args[4]->num);
+                return Value::Num(id);
+            }
+            if (fname == "textbox") {
+                if (args.size() < 4) throw LangError("textbox() expects (x, y, w, h)", n->line);
+                int id = gui.addTextbox((int)args[0]->num, (int)args[1]->num, (int)args[2]->num, (int)args[3]->num);
+                return Value::Num(id);
+            }
+            if (fname == "set_text") {
+                if (args.size() < 2) throw LangError("set_text() expects (controlId, text)", n->line);
+                gui.setText((int)args[0]->num, args[1]->toDisplay());
+                return Value::Nil();
+            }
+            if (fname == "get_text") {
+                if (args.empty()) throw LangError("get_text() expects (controlId)", n->line);
+                return Value::Str(gui.getText((int)args[0]->num));
+            }
+            if (fname == "run_app") {
+                gui.runMessageLoop();
+                return Value::Nil();
+            }
+#endif
+
             // user-defined function?
             ValueP callee = env->get(fname, n->line);
             return callUserFunction(callee, args, n->line);
@@ -795,6 +984,23 @@ public:
         return Value::Nil();
     }
 };
+
+#ifdef _WIN32
+// Defined here (after Interpreter) because it needs to call back into the
+// interpreter's global environment to run the .z click-handler function.
+inline void GuiRuntime::fireClick(const std::string& funcName) {
+    if (!interp) return;
+    try {
+        ValueP fn = interp->globals->get(funcName, 0);
+        std::vector<ValueP> noArgs;
+        interp->callUserFunction(fn, noArgs, 0);
+    } catch (LangError& e) {
+        if (interp->onPrint) interp->onPrint("GUI Error (line " + std::to_string(e.line) + "): " + e.what());
+    } catch (std::exception& e) {
+        if (interp->onPrint) interp->onPrint(std::string("GUI Fatal Error: ") + e.what());
+    }
+}
+#endif
 
 // ====================== STUDIO UI ======================
 // ---------------------------------------------------------------------
