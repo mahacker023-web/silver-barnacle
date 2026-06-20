@@ -1,24 +1,14 @@
-// =====================================================================
-// MalikLang Studio - Complete Single-File Build (v2 - with GUI support)
-// Real lexer + parser + interpreter + GUI builtins (window/button/label/textbox)
-// combined with professional Win32 IDE
-// =====================================================================
-#include <windows.h>
-#include <commdlg.h>
-#include <commctrl.h>
-#include <string>
-#include <vector>
-#include <unordered_map>
-#include <memory>
-#include <functional>
-#include <sstream>
-#include <stdexcept>
-#include <cmath>
-
-#pragma comment(lib, "comctl32.lib")
-#pragma comment(lib, "comdlg32.lib")
-
-// ====================== LANGUAGE ENGINE (+ GUI runtime) ======================
+// ==========================================================================
+// MalikLangStudio.cpp - Single-file build for GitHub Actions / MSVC
+// Combines: engine.hpp (lexer+parser+interpreter+GUI runtime) and the
+// Win32 IDE (editor, console, Save/Open, Run, Preview panel).
+// ==========================================================================
+// ==========================================================================
+// MalikLang Engine - Core Language: Lexer + Parser + Interpreter
+// Single-header, no external dependencies (besides standard C++17 library)
+// ==========================================================================
+// (pragma once intentionally omitted here in the combined single-file
+// build; engine.hpp itself still has it when used standalone as a header)
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -26,25 +16,40 @@
 #include <variant>
 #include <functional>
 #include <sstream>
-#include <stdexcept>
 #include <cmath>
+#include <stdexcept>
+#include <iostream>
 
 #ifdef _WIN32
-#include <windows.h>
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+  #ifndef NOMINMAX
+    #define NOMINMAX
+  #endif
+  #include <windows.h>
+  #include <commctrl.h>
 #endif
 
-// ---------------------------------------------------------------------
-// 1. TOKENS
-// ---------------------------------------------------------------------
+// ==========================================================================
+// Errors
+// ==========================================================================
+struct MalikError : public std::runtime_error {
+    int line;
+    MalikError(const std::string& msg, int ln)
+        : std::runtime_error(msg), line(ln) {}
+};
+
+// ==========================================================================
+// Lexer
+// ==========================================================================
 enum class TokType {
-    NUMBER, STRING, IDENT, BOOL,
-    LET, FUNC, IF, ELSE, WHILE, FOR, RETURN, TRUE_, FALSE_, NIL,
-    PLUS, MINUS, STAR, SLASH, PERCENT,
-    ASSIGN, EQ, NEQ, LT, GT, LE, GE, AND, OR, NOT,
-    LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
-    COMMA, SEMI, DOT,
-    PRINT,
-    END_OF_FILE
+    Number, String, Ident, Keyword,
+    Plus, Minus, Star, Slash, Percent,
+    Assign, Eq, NotEq, Lt, Gt, LtEq, GtEq, And, Or, Not,
+    LParen, RParen, LBrace, RBrace, LBracket, RBracket,
+    Comma, Semicolon,
+    End
 };
 
 struct Token {
@@ -54,1409 +59,1680 @@ struct Token {
     int line = 1;
 };
 
-class LangError : public std::runtime_error {
-public:
-    int line;
-    LangError(const std::string& msg, int ln) : std::runtime_error(msg), line(ln) {}
+static const std::vector<std::string> KEYWORDS = {
+    "let", "print", "if", "else", "while", "for", "func", "return",
+    "true", "false", "null"
 };
 
-// ---------------------------------------------------------------------
-// 2. LEXER
-// ---------------------------------------------------------------------
 class Lexer {
+public:
+    Lexer(const std::string& src) : src(src) {}
+
+    std::vector<Token> tokenize() {
+        std::vector<Token> tokens;
+        while (true) {
+            Token t = next();
+            tokens.push_back(t);
+            if (t.type == TokType::End) break;
+        }
+        return tokens;
+    }
+
+private:
     std::string src;
     size_t pos = 0;
     int line = 1;
-public:
-    Lexer(const std::string& s) : src(s) {}
 
     char peek(int off = 0) {
         size_t p = pos + off;
-        return p < src.size() ? src[p] : '\0';
+        if (p >= src.size()) return '\0';
+        return src[p];
     }
+
     char advance() {
         char c = src[pos++];
         if (c == '\n') line++;
         return c;
     }
 
-    std::vector<Token> tokenize() {
-        std::vector<Token> toks;
-        while (pos < src.size()) {
+    void skipWhitespaceAndComments() {
+        for (;;) {
             char c = peek();
-
-            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { advance(); continue; }
-
-            // comments
-            if (c == '/' && peek(1) == '/') {
-                while (pos < src.size() && peek() != '\n') advance();
-                continue;
-            }
-
-            int startLine = line;
-
-            // string literal
-            if (c == '"') {
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
                 advance();
-                std::string s;
-                while (pos < src.size() && peek() != '"') {
-                    char ch = advance();
-                    if (ch == '\\' && peek() == 'n') { advance(); s += '\n'; }
-                    else if (ch == '\\' && peek() == '"') { advance(); s += '"'; }
-                    else s += ch;
-                }
-                if (pos >= src.size()) throw LangError("Unterminated string", startLine);
-                advance(); // closing quote
-                toks.push_back({TokType::STRING, s, 0, startLine});
-                continue;
-            }
-
-            // number
-            if (isdigit((unsigned char)c)) {
-                std::string num;
-                while (isdigit((unsigned char)peek()) || peek() == '.') num += advance();
-                toks.push_back({TokType::NUMBER, num, std::stod(num), startLine});
-                continue;
-            }
-
-            // identifier / keyword
-            if (isalpha((unsigned char)c) || c == '_') {
-                std::string id;
-                while (isalnum((unsigned char)peek()) || peek() == '_') id += advance();
-
-                TokType t = TokType::IDENT;
-                if (id == "let" || id == "set") t = TokType::LET;
-                else if (id == "func") t = TokType::FUNC;
-                else if (id == "if") t = TokType::IF;
-                else if (id == "else") t = TokType::ELSE;
-                else if (id == "while") t = TokType::WHILE;
-                else if (id == "for") t = TokType::FOR;
-                else if (id == "return") t = TokType::RETURN;
-                else if (id == "true") t = TokType::TRUE_;
-                else if (id == "false") t = TokType::FALSE_;
-                else if (id == "nil" || id == "null") t = TokType::NIL;
-                else if (id == "print") t = TokType::PRINT;
-                else if (id == "and") t = TokType::AND;
-                else if (id == "or") t = TokType::OR;
-                else if (id == "not") t = TokType::NOT;
-
-                toks.push_back({t, id, 0, startLine});
-                continue;
-            }
-
-            // operators / punctuation
-            advance();
-            switch (c) {
-                case '+': toks.push_back({TokType::PLUS, "+", 0, startLine}); break;
-                case '-': toks.push_back({TokType::MINUS, "-", 0, startLine}); break;
-                case '*': toks.push_back({TokType::STAR, "*", 0, startLine}); break;
-                case '%': toks.push_back({TokType::PERCENT, "%", 0, startLine}); break;
-                case '/': toks.push_back({TokType::SLASH, "/", 0, startLine}); break;
-                case '(': toks.push_back({TokType::LPAREN, "(", 0, startLine}); break;
-                case ')': toks.push_back({TokType::RPAREN, ")", 0, startLine}); break;
-                case '{': toks.push_back({TokType::LBRACE, "{", 0, startLine}); break;
-                case '}': toks.push_back({TokType::RBRACE, "}", 0, startLine}); break;
-                case '[': toks.push_back({TokType::LBRACKET, "[", 0, startLine}); break;
-                case ']': toks.push_back({TokType::RBRACKET, "]", 0, startLine}); break;
-                case ',': toks.push_back({TokType::COMMA, ",", 0, startLine}); break;
-                case ';': toks.push_back({TokType::SEMI, ";", 0, startLine}); break;
-                case '.': toks.push_back({TokType::DOT, ".", 0, startLine}); break;
-                case '=':
-                    if (peek() == '=') { advance(); toks.push_back({TokType::EQ, "==", 0, startLine}); }
-                    else toks.push_back({TokType::ASSIGN, "=", 0, startLine});
-                    break;
-                case '!':
-                    if (peek() == '=') { advance(); toks.push_back({TokType::NEQ, "!=", 0, startLine}); }
-                    else toks.push_back({TokType::NOT, "!", 0, startLine});
-                    break;
-                case '<':
-                    if (peek() == '=') { advance(); toks.push_back({TokType::LE, "<=", 0, startLine}); }
-                    else toks.push_back({TokType::LT, "<", 0, startLine});
-                    break;
-                case '>':
-                    if (peek() == '=') { advance(); toks.push_back({TokType::GE, ">=", 0, startLine}); }
-                    else toks.push_back({TokType::GT, ">", 0, startLine});
-                    break;
-                case '&':
-                    if (peek() == '&') { advance(); toks.push_back({TokType::AND, "&&", 0, startLine}); }
-                    break;
-                case '|':
-                    if (peek() == '|') { advance(); toks.push_back({TokType::OR, "||", 0, startLine}); }
-                    break;
-                default:
-                    throw LangError(std::string("Unexpected character '") + c + "'", startLine);
+            } else if (c == '/' && peek(1) == '/') {
+                while (peek() != '\n' && peek() != '\0') advance();
+            } else if (c == '/' && peek(1) == '*') {
+                advance(); advance();
+                while (!(peek() == '*' && peek(1) == '/') && peek() != '\0') advance();
+                if (peek() != '\0') { advance(); advance(); }
+            } else {
+                break;
             }
         }
-        toks.push_back({TokType::END_OF_FILE, "", 0, line});
-        return toks;
+    }
+
+    Token make(TokType ty, const std::string& text = "") {
+        Token t; t.type = ty; t.text = text; t.line = line;
+        return t;
+    }
+
+    Token next() {
+        skipWhitespaceAndComments();
+        if (pos >= src.size()) return make(TokType::End);
+
+        int startLine = line;
+        char c = peek();
+
+        // Number
+        if (isdigit((unsigned char)c) || (c == '.' && isdigit((unsigned char)peek(1)))) {
+            std::string numStr;
+            while (isdigit((unsigned char)peek()) || peek() == '.') {
+                numStr += advance();
+            }
+            Token t = make(TokType::Number, numStr);
+            t.line = startLine;
+            t.num = std::stod(numStr);
+            return t;
+        }
+
+        // String
+        if (c == '"') {
+            advance();
+            std::string s;
+            while (peek() != '"' && peek() != '\0') {
+                char ch = advance();
+                if (ch == '\\') {
+                    char esc = advance();
+                    if (esc == 'n') s += '\n';
+                    else if (esc == 't') s += '\t';
+                    else if (esc == '"') s += '"';
+                    else if (esc == '\\') s += '\\';
+                    else s += esc;
+                } else {
+                    s += ch;
+                }
+            }
+            if (peek() == '"') advance();
+            else throw MalikError("Unterminated string literal", startLine);
+            Token t = make(TokType::String, s);
+            t.line = startLine;
+            return t;
+        }
+
+        // Identifier / keyword
+        if (isalpha((unsigned char)c) || c == '_') {
+            std::string id;
+            while (isalnum((unsigned char)peek()) || peek() == '_') id += advance();
+            Token t;
+            bool isKw = false;
+            for (auto& k : KEYWORDS) if (k == id) { isKw = true; break; }
+            t.type = isKw ? TokType::Keyword : TokType::Ident;
+            t.text = id;
+            t.line = startLine;
+            return t;
+        }
+
+        // Operators / punctuation
+        advance();
+        switch (c) {
+            case '+': return make(TokType::Plus, "+");
+            case '-': return make(TokType::Minus, "-");
+            case '*': return make(TokType::Star, "*");
+            case '/': return make(TokType::Slash, "/");
+            case '%': return make(TokType::Percent, "%");
+            case '(': return make(TokType::LParen, "(");
+            case ')': return make(TokType::RParen, ")");
+            case '{': return make(TokType::LBrace, "{");
+            case '}': return make(TokType::RBrace, "}");
+            case '[': return make(TokType::LBracket, "[");
+            case ']': return make(TokType::RBracket, "]");
+            case ',': return make(TokType::Comma, ",");
+            case ';': return make(TokType::Semicolon, ";");
+            case '=':
+                if (peek() == '=') { advance(); return make(TokType::Eq, "=="); }
+                return make(TokType::Assign, "=");
+            case '!':
+                if (peek() == '=') { advance(); return make(TokType::NotEq, "!="); }
+                return make(TokType::Not, "!");
+            case '<':
+                if (peek() == '=') { advance(); return make(TokType::LtEq, "<="); }
+                return make(TokType::Lt, "<");
+            case '>':
+                if (peek() == '=') { advance(); return make(TokType::GtEq, ">="); }
+                return make(TokType::Gt, ">");
+            case '&':
+                if (peek() == '&') { advance(); return make(TokType::And, "&&"); }
+                throw MalikError("Unexpected character '&'", startLine);
+            case '|':
+                if (peek() == '|') { advance(); return make(TokType::Or, "||"); }
+                throw MalikError("Unexpected character '|'", startLine);
+            default:
+                throw MalikError(std::string("Unexpected character '") + c + "'", startLine);
+        }
     }
 };
 
-// ---------------------------------------------------------------------
-// 3. AST NODES
-// ---------------------------------------------------------------------
+// ==========================================================================
+// AST
+// ==========================================================================
 struct Node;
-using NodeP = std::shared_ptr<Node>;
+using NodePtr = std::shared_ptr<Node>;
 
-enum class NType {
-    NUMBER, STRING, BOOL, NIL, IDENT, ARRAY,
-    BINOP, UNARY, ASSIGN, INDEX, CALL,
-    LET, PRINT, IF, WHILE, FOR, BLOCK, FUNC, RETURN, EXPR_STMT, PROGRAM
+enum class NodeType {
+    Number, String, Bool, Null, Ident,
+    Binary, Unary, Logical,
+    Assign, IndexAssign,
+    Let, Print, If, While, For, FuncDecl, Return,
+    Call, Index, ArrayLit,
+    Block, ExprStmt, Program
 };
 
 struct Node {
-    NType type;
-    int line = 0;
+    NodeType type;
+    int line = 1;
 
-    // literals
+    // Literals
     double numVal = 0;
     std::string strVal;
     bool boolVal = false;
 
-    // generic children
-    std::vector<NodeP> children;     // block statements / array elements / call args
-    NodeP a, b, c, d;                // operands (op, left, right, etc.)
-    std::string name;                // identifier name / func name / op symbol
-    std::vector<std::string> params; // function parameters
+    // Generic children
+    std::string name;             // ident name / func name / op
+    std::vector<NodePtr> list;    // statements, args, array elements
+    NodePtr a, b, c, d;           // generic child slots
+
+    // Function decl
+    std::vector<std::string> params;
 };
 
-NodeP mk(NType t, int line) { auto n = std::make_shared<Node>(); n->type = t; n->line = line; return n; }
+static NodePtr mkNode(NodeType t, int line) {
+    auto n = std::make_shared<Node>();
+    n->type = t;
+    n->line = line;
+    return n;
+}
 
-// ---------------------------------------------------------------------
-// 4. PARSER (recursive descent)
-// ---------------------------------------------------------------------
+// ==========================================================================
+// Parser (recursive descent)
+// ==========================================================================
 class Parser {
-    std::vector<Token> toks;
-    size_t pos = 0;
 public:
-    Parser(std::vector<Token> t) : toks(std::move(t)) {}
+    Parser(std::vector<Token> toks) : toks(std::move(toks)) {}
 
-    Token& cur() { return toks[pos]; }
-    Token& peekNext() { return toks[pos + 1 < toks.size() ? pos + 1 : pos]; }
-    bool check(TokType t) { return cur().type == t; }
-    Token advance() { return toks[pos++]; }
-    Token expect(TokType t, const std::string& msg) {
-        if (!check(t)) throw LangError("Expected " + msg + " but got '" + cur().text + "'", cur().line);
-        return advance();
-    }
-
-    NodeP parseProgram() {
-        auto prog = mk(NType::PROGRAM, 1);
-        while (!check(TokType::END_OF_FILE)) prog->children.push_back(parseStatement());
+    NodePtr parseProgram() {
+        auto prog = mkNode(NodeType::Program, 1);
+        while (!check(TokType::End)) {
+            prog->list.push_back(statement());
+        }
         return prog;
     }
 
-    NodeP parseStatement() {
-        if (check(TokType::LET)) return parseLet();
-        if (check(TokType::PRINT)) return parsePrint();
-        if (check(TokType::IF)) return parseIf();
-        if (check(TokType::WHILE)) return parseWhile();
-        if (check(TokType::FOR)) return parseFor();
-        if (check(TokType::FUNC)) return parseFunc();
-        if (check(TokType::RETURN)) return parseReturn();
-        if (check(TokType::LBRACE)) return parseBlock();
-        return parseExprStmt();
+private:
+    std::vector<Token> toks;
+    size_t pos = 0;
+
+    Token& peek(int off = 0) {
+        size_t p = pos + off;
+        if (p >= toks.size()) return toks.back();
+        return toks[p];
+    }
+    Token& cur() { return peek(0); }
+
+    bool check(TokType t) { return cur().type == t; }
+    bool checkKw(const std::string& kw) {
+        return cur().type == TokType::Keyword && cur().text == kw;
     }
 
-    NodeP parseLet() {
-        int ln = cur().line; advance(); // let/set
-        std::string name = expect(TokType::IDENT, "variable name").text;
-        expect(TokType::ASSIGN, "'='");
-        NodeP val = parseExpr();
-        if (check(TokType::SEMI)) advance();
-        auto n = mk(NType::LET, ln); n->name = name; n->a = val;
-        return n;
+    Token advance() {
+        Token t = cur();
+        if (pos < toks.size() - 1) pos++;
+        return t;
     }
 
-    NodeP parsePrint() {
-        int ln = cur().line; advance();
-        NodeP val = parseExpr();
-        if (check(TokType::SEMI)) advance();
-        auto n = mk(NType::PRINT, ln); n->a = val;
-        return n;
-    }
-
-    NodeP parseBlock() {
-        int ln = cur().line;
-        expect(TokType::LBRACE, "'{'");
-        auto n = mk(NType::BLOCK, ln);
-        while (!check(TokType::RBRACE) && !check(TokType::END_OF_FILE))
-            n->children.push_back(parseStatement());
-        expect(TokType::RBRACE, "'}'");
-        return n;
-    }
-
-    NodeP parseIf() {
-        int ln = cur().line; advance();
-        expect(TokType::LPAREN, "'(' after if");
-        NodeP cond = parseExpr();
-        expect(TokType::RPAREN, "')'");
-        NodeP thenB = parseStatement();
-        NodeP elseB = nullptr;
-        if (check(TokType::ELSE)) { advance(); elseB = parseStatement(); }
-        auto n = mk(NType::IF, ln); n->a = cond; n->b = thenB; n->c = elseB;
-        return n;
-    }
-
-    NodeP parseWhile() {
-        int ln = cur().line; advance();
-        expect(TokType::LPAREN, "'(' after while");
-        NodeP cond = parseExpr();
-        expect(TokType::RPAREN, "')'");
-        NodeP body = parseStatement();
-        auto n = mk(NType::WHILE, ln); n->a = cond; n->b = body;
-        return n;
-    }
-
-    NodeP parseFor() {
-        // for (let i = 0; i < 10; i = i + 1) { ... }
-        int ln = cur().line; advance();
-        expect(TokType::LPAREN, "'(' after for");
-        NodeP init = check(TokType::LET) ? parseLet() : nullptr;
-        if (!init && check(TokType::SEMI)) advance();
-        NodeP cond = parseExpr();
-        expect(TokType::SEMI, "';'");
-        NodeP step = parseAssignExpr();
-        expect(TokType::RPAREN, "')'");
-        NodeP body = parseStatement();
-        auto n = mk(NType::FOR, ln); n->a = init; n->b = cond; n->c = step; n->d = body;
-        return n;
-    }
-
-    NodeP parseFunc() {
-        int ln = cur().line; advance();
-        std::string name = expect(TokType::IDENT, "function name").text;
-        expect(TokType::LPAREN, "'('");
-        std::vector<std::string> params;
-        if (!check(TokType::RPAREN)) {
-            params.push_back(expect(TokType::IDENT, "parameter name").text);
-            while (check(TokType::COMMA)) { advance(); params.push_back(expect(TokType::IDENT, "parameter name").text); }
+    Token expect(TokType t, const std::string& what) {
+        if (!check(t)) {
+            throw MalikError("Expected " + what + " but got '" + cur().text + "'", cur().line);
         }
-        expect(TokType::RPAREN, "')'");
-        NodeP body = parseBlock();
-        auto n = mk(NType::FUNC, ln); n->name = name; n->params = params; n->a = body;
-        return n;
+        return advance();
     }
 
-    NodeP parseReturn() {
-        int ln = cur().line; advance();
-        NodeP val = nullptr;
-        if (!check(TokType::SEMI) && !check(TokType::RBRACE)) val = parseExpr();
-        if (check(TokType::SEMI)) advance();
-        auto n = mk(NType::RETURN, ln); n->a = val;
-        return n;
+    void expectKw(const std::string& kw) {
+        if (!checkKw(kw)) {
+            throw MalikError("Expected '" + kw + "' but got '" + cur().text + "'", cur().line);
+        }
+        advance();
     }
 
-    NodeP parseExprStmt() {
+    // ---- Statements ----
+    NodePtr statement() {
+        if (checkKw("let")) return letStmt();
+        if (checkKw("print")) return printStmt();
+        if (checkKw("if")) return ifStmt();
+        if (checkKw("while")) return whileStmt();
+        if (checkKw("for")) return forStmt();
+        if (checkKw("func")) return funcDecl();
+        if (checkKw("return")) return returnStmt();
+        if (check(TokType::LBrace)) return block();
+        return exprStmt();
+    }
+
+    NodePtr block() {
         int ln = cur().line;
-        NodeP e = parseAssignExpr();
-        if (check(TokType::SEMI)) advance();
-        auto n = mk(NType::EXPR_STMT, ln); n->a = e;
+        expect(TokType::LBrace, "'{'");
+        auto b = mkNode(NodeType::Block, ln);
+        while (!check(TokType::RBrace) && !check(TokType::End)) {
+            b->list.push_back(statement());
+        }
+        expect(TokType::RBrace, "'}'");
+        return b;
+    }
+
+    NodePtr letStmt() {
+        int ln = cur().line;
+        advance(); // 'let'
+        std::string name = expect(TokType::Ident, "identifier").text;
+        expect(TokType::Assign, "'='");
+        NodePtr val = expression();
+        auto n = mkNode(NodeType::Let, ln);
+        n->name = name;
+        n->a = val;
         return n;
     }
 
-    // ---- expressions (precedence climbing) ----
-    NodeP parseExpr() { return parseAssignExpr(); }
+    NodePtr printStmt() {
+        int ln = cur().line;
+        advance(); // 'print'
+        NodePtr val = expression();
+        auto n = mkNode(NodeType::Print, ln);
+        n->a = val;
+        return n;
+    }
 
-    NodeP parseAssignExpr() {
-        NodeP left = parseOr();
-        if (check(TokType::ASSIGN)) {
-            int ln = cur().line; advance();
-            NodeP val = parseAssignExpr();
-            auto n = mk(NType::ASSIGN, ln); n->a = left; n->b = val;
-            return n;
+    NodePtr ifStmt() {
+        int ln = cur().line;
+        advance(); // 'if'
+        expect(TokType::LParen, "'('");
+        NodePtr cond = expression();
+        expect(TokType::RParen, "')'");
+        NodePtr thenB = block();
+        NodePtr elseB = nullptr;
+        if (checkKw("else")) {
+            advance();
+            if (checkKw("if")) elseB = ifStmt();
+            else elseB = block();
+        }
+        auto n = mkNode(NodeType::If, ln);
+        n->a = cond; n->b = thenB; n->c = elseB;
+        return n;
+    }
+
+    NodePtr whileStmt() {
+        int ln = cur().line;
+        advance(); // 'while'
+        expect(TokType::LParen, "'('");
+        NodePtr cond = expression();
+        expect(TokType::RParen, "')'");
+        NodePtr body = block();
+        auto n = mkNode(NodeType::While, ln);
+        n->a = cond; n->b = body;
+        return n;
+    }
+
+    NodePtr forStmt() {
+        int ln = cur().line;
+        advance(); // 'for'
+        expect(TokType::LParen, "'('");
+        NodePtr init = checkKw("let") ? letStmt() : exprStmt();
+        expect(TokType::Semicolon, "';'");
+        NodePtr cond = expression();
+        expect(TokType::Semicolon, "';'");
+        NodePtr step = expression();
+        expect(TokType::RParen, "')'");
+        NodePtr body = block();
+        auto n = mkNode(NodeType::For, ln);
+        n->a = init; n->b = cond; n->c = step; n->d = body;
+        return n;
+    }
+
+    NodePtr funcDecl() {
+        int ln = cur().line;
+        advance(); // 'func'
+        std::string name = expect(TokType::Ident, "function name").text;
+        expect(TokType::LParen, "'('");
+        std::vector<std::string> params;
+        if (!check(TokType::RParen)) {
+            params.push_back(expect(TokType::Ident, "parameter name").text);
+            while (check(TokType::Comma)) {
+                advance();
+                params.push_back(expect(TokType::Ident, "parameter name").text);
+            }
+        }
+        expect(TokType::RParen, "')'");
+        NodePtr body = block();
+        auto n = mkNode(NodeType::FuncDecl, ln);
+        n->name = name;
+        n->params = params;
+        n->a = body;
+        return n;
+    }
+
+    NodePtr returnStmt() {
+        int ln = cur().line;
+        advance(); // 'return'
+        auto n = mkNode(NodeType::Return, ln);
+        // allow bare 'return' with no value
+        if (!check(TokType::RBrace) && !check(TokType::Semicolon)) {
+            n->a = expression();
+        }
+        return n;
+    }
+
+    NodePtr exprStmt() {
+        int ln = cur().line;
+        NodePtr e = expression();
+        auto n = mkNode(NodeType::ExprStmt, ln);
+        n->a = e;
+        return n;
+    }
+
+    // ---- Expressions (precedence climbing) ----
+    NodePtr expression() { return assignment(); }
+
+    NodePtr assignment() {
+        NodePtr left = logicOr();
+        if (check(TokType::Assign)) {
+            int ln = cur().line;
+            advance();
+            NodePtr value = assignment();
+            if (left->type == NodeType::Ident) {
+                auto n = mkNode(NodeType::Assign, ln);
+                n->name = left->name;
+                n->a = value;
+                return n;
+            } else if (left->type == NodeType::Index) {
+                auto n = mkNode(NodeType::IndexAssign, ln);
+                n->a = left->a;   // array expr
+                n->b = left->b;   // index expr
+                n->c = value;     // value
+                return n;
+            }
+            throw MalikError("Invalid assignment target", ln);
         }
         return left;
     }
 
-    NodeP parseOr() {
-        NodeP l = parseAnd();
-        while (check(TokType::OR)) {
+    NodePtr logicOr() {
+        NodePtr left = logicAnd();
+        while (check(TokType::Or)) {
             int ln = cur().line; advance();
-            NodeP r = parseAnd();
-            auto n = mk(NType::BINOP, ln); n->name = "||"; n->a = l; n->b = r; l = n;
+            NodePtr right = logicAnd();
+            auto n = mkNode(NodeType::Logical, ln);
+            n->name = "||"; n->a = left; n->b = right;
+            left = n;
         }
-        return l;
-    }
-    NodeP parseAnd() {
-        NodeP l = parseEquality();
-        while (check(TokType::AND)) {
-            int ln = cur().line; advance();
-            NodeP r = parseEquality();
-            auto n = mk(NType::BINOP, ln); n->name = "&&"; n->a = l; n->b = r; l = n;
-        }
-        return l;
-    }
-    NodeP parseEquality() {
-        NodeP l = parseComparison();
-        while (check(TokType::EQ) || check(TokType::NEQ)) {
-            std::string op = cur().text; int ln = cur().line; advance();
-            NodeP r = parseComparison();
-            auto n = mk(NType::BINOP, ln); n->name = op; n->a = l; n->b = r; l = n;
-        }
-        return l;
-    }
-    NodeP parseComparison() {
-        NodeP l = parseAdd();
-        while (check(TokType::LT) || check(TokType::GT) || check(TokType::LE) || check(TokType::GE)) {
-            std::string op = cur().text; int ln = cur().line; advance();
-            NodeP r = parseAdd();
-            auto n = mk(NType::BINOP, ln); n->name = op; n->a = l; n->b = r; l = n;
-        }
-        return l;
-    }
-    NodeP parseAdd() {
-        NodeP l = parseMul();
-        while (check(TokType::PLUS) || check(TokType::MINUS)) {
-            std::string op = cur().text; int ln = cur().line; advance();
-            NodeP r = parseMul();
-            auto n = mk(NType::BINOP, ln); n->name = op; n->a = l; n->b = r; l = n;
-        }
-        return l;
-    }
-    NodeP parseMul() {
-        NodeP l = parseUnary();
-        while (check(TokType::STAR) || check(TokType::SLASH) || check(TokType::PERCENT)) {
-            std::string op = cur().text; int ln = cur().line; advance();
-            NodeP r = parseUnary();
-            auto n = mk(NType::BINOP, ln); n->name = op; n->a = l; n->b = r; l = n;
-        }
-        return l;
-    }
-    NodeP parseUnary() {
-        if (check(TokType::MINUS) || check(TokType::NOT)) {
-            std::string op = cur().text; int ln = cur().line; advance();
-            NodeP r = parseUnary();
-            auto n = mk(NType::UNARY, ln); n->name = op; n->a = r;
-            return n;
-        }
-        return parseCallOrIndex();
+        return left;
     }
 
-    NodeP parseCallOrIndex() {
-        NodeP n = parsePrimary();
-        while (true) {
-            if (check(TokType::LPAREN)) {
-                int ln = cur().line; advance();
-                auto call = mk(NType::CALL, ln);
-                call->a = n;
-                if (!check(TokType::RPAREN)) {
-                    call->children.push_back(parseExpr());
-                    while (check(TokType::COMMA)) { advance(); call->children.push_back(parseExpr()); }
+    NodePtr logicAnd() {
+        NodePtr left = equality();
+        while (check(TokType::And)) {
+            int ln = cur().line; advance();
+            NodePtr right = equality();
+            auto n = mkNode(NodeType::Logical, ln);
+            n->name = "&&"; n->a = left; n->b = right;
+            left = n;
+        }
+        return left;
+    }
+
+    NodePtr equality() {
+        NodePtr left = comparison();
+        while (check(TokType::Eq) || check(TokType::NotEq)) {
+            std::string op = cur().text; int ln = cur().line; advance();
+            NodePtr right = comparison();
+            auto n = mkNode(NodeType::Binary, ln);
+            n->name = op; n->a = left; n->b = right;
+            left = n;
+        }
+        return left;
+    }
+
+    NodePtr comparison() {
+        NodePtr left = addSub();
+        while (check(TokType::Lt) || check(TokType::Gt) || check(TokType::LtEq) || check(TokType::GtEq)) {
+            std::string op = cur().text; int ln = cur().line; advance();
+            NodePtr right = addSub();
+            auto n = mkNode(NodeType::Binary, ln);
+            n->name = op; n->a = left; n->b = right;
+            left = n;
+        }
+        return left;
+    }
+
+    NodePtr addSub() {
+        NodePtr left = mulDiv();
+        while (check(TokType::Plus) || check(TokType::Minus)) {
+            std::string op = cur().text; int ln = cur().line; advance();
+            NodePtr right = mulDiv();
+            auto n = mkNode(NodeType::Binary, ln);
+            n->name = op; n->a = left; n->b = right;
+            left = n;
+        }
+        return left;
+    }
+
+    NodePtr mulDiv() {
+        NodePtr left = unary();
+        while (check(TokType::Star) || check(TokType::Slash) || check(TokType::Percent)) {
+            std::string op = cur().text; int ln = cur().line; advance();
+            NodePtr right = unary();
+            auto n = mkNode(NodeType::Binary, ln);
+            n->name = op; n->a = left; n->b = right;
+            left = n;
+        }
+        return left;
+    }
+
+    NodePtr unary() {
+        if (check(TokType::Minus) || check(TokType::Not)) {
+            std::string op = cur().text; int ln = cur().line; advance();
+            NodePtr operand = unary();
+            auto n = mkNode(NodeType::Unary, ln);
+            n->name = op; n->a = operand;
+            return n;
+        }
+        return callOrIndex();
+    }
+
+    NodePtr callOrIndex() {
+        NodePtr expr = primary();
+        for (;;) {
+            if (check(TokType::LParen)) {
+                int ln = cur().line;
+                advance();
+                std::vector<NodePtr> args;
+                if (!check(TokType::RParen)) {
+                    args.push_back(expression());
+                    while (check(TokType::Comma)) { advance(); args.push_back(expression()); }
                 }
-                expect(TokType::RPAREN, "')'");
-                n = call;
-            } else if (check(TokType::LBRACKET)) {
-                int ln = cur().line; advance();
-                NodeP idx = parseExpr();
-                expect(TokType::RBRACKET, "']'");
-                auto in = mk(NType::INDEX, ln); in->a = n; in->b = idx;
-                n = in;
-            } else break;
+                expect(TokType::RParen, "')'");
+                auto n = mkNode(NodeType::Call, ln);
+                n->a = expr;
+                n->list = args;
+                // preserve callee name for builtins/user funcs
+                if (expr->type == NodeType::Ident) n->name = expr->name;
+                expr = n;
+            } else if (check(TokType::LBracket)) {
+                int ln = cur().line;
+                advance();
+                NodePtr idx = expression();
+                expect(TokType::RBracket, "']'");
+                auto n = mkNode(NodeType::Index, ln);
+                n->a = expr; n->b = idx;
+                expr = n;
+            } else {
+                break;
+            }
         }
-        return n;
+        return expr;
     }
 
-    NodeP parsePrimary() {
+    NodePtr primary() {
         int ln = cur().line;
-        if (check(TokType::NUMBER)) { auto n = mk(NType::NUMBER, ln); n->numVal = cur().num; advance(); return n; }
-        if (check(TokType::STRING)) { auto n = mk(NType::STRING, ln); n->strVal = cur().text; advance(); return n; }
-        if (check(TokType::TRUE_)) { advance(); auto n = mk(NType::BOOL, ln); n->boolVal = true; return n; }
-        if (check(TokType::FALSE_)) { advance(); auto n = mk(NType::BOOL, ln); n->boolVal = false; return n; }
-        if (check(TokType::NIL)) { advance(); return mk(NType::NIL, ln); }
-        if (check(TokType::IDENT)) { auto n = mk(NType::IDENT, ln); n->name = cur().text; advance(); return n; }
-        if (check(TokType::LPAREN)) { advance(); NodeP e = parseExpr(); expect(TokType::RPAREN, "')'"); return e; }
-        if (check(TokType::LBRACKET)) {
+        if (check(TokType::Number)) {
+            auto n = mkNode(NodeType::Number, ln);
+            n->numVal = cur().num;
             advance();
-            auto n = mk(NType::ARRAY, ln);
-            if (!check(TokType::RBRACKET)) {
-                n->children.push_back(parseExpr());
-                while (check(TokType::COMMA)) { advance(); n->children.push_back(parseExpr()); }
-            }
-            expect(TokType::RBRACKET, "']'");
             return n;
         }
-        throw LangError("Unexpected token '" + cur().text + "'", ln);
+        if (check(TokType::String)) {
+            auto n = mkNode(NodeType::String, ln);
+            n->strVal = cur().text;
+            advance();
+            return n;
+        }
+        if (checkKw("true")) {
+            advance();
+            auto n = mkNode(NodeType::Bool, ln); n->boolVal = true; return n;
+        }
+        if (checkKw("false")) {
+            advance();
+            auto n = mkNode(NodeType::Bool, ln); n->boolVal = false; return n;
+        }
+        if (checkKw("null")) {
+            advance();
+            return mkNode(NodeType::Null, ln);
+        }
+        if (check(TokType::Ident)) {
+            auto n = mkNode(NodeType::Ident, ln);
+            n->name = cur().text;
+            advance();
+            return n;
+        }
+        if (check(TokType::LParen)) {
+            advance();
+            NodePtr e = expression();
+            expect(TokType::RParen, "')'");
+            return e;
+        }
+        if (check(TokType::LBracket)) {
+            advance();
+            auto n = mkNode(NodeType::ArrayLit, ln);
+            if (!check(TokType::RBracket)) {
+                n->list.push_back(expression());
+                while (check(TokType::Comma)) { advance(); n->list.push_back(expression()); }
+            }
+            expect(TokType::RBracket, "']'");
+            return n;
+        }
+        throw MalikError("Unexpected token '" + cur().text + "'", ln);
     }
 };
 
-// ---------------------------------------------------------------------
-// 5. VALUES + INTERPRETER
-// ---------------------------------------------------------------------
+// ==========================================================================
+// Values
+// ==========================================================================
 struct Value;
-using ValueP = std::shared_ptr<Value>;
+using ValuePtr = std::shared_ptr<Value>;
 
-enum class VType { NUMBER, STRING, BOOL, NIL, ARRAY, FUNCTION };
-
-struct Environment;
-using EnvP = std::shared_ptr<Environment>;
+enum class VType { Number, String, Bool, Null, Array };
 
 struct Value {
-    VType type = VType::NIL;
+    VType type = VType::Null;
     double num = 0;
     std::string str;
     bool boolean = false;
-    std::vector<ValueP> arr;
+    std::vector<ValuePtr> arr;
 
-    // function
-    NodeP funcNode;
-    EnvP closure;
-
-    static ValueP Num(double n) { auto v = std::make_shared<Value>(); v->type = VType::NUMBER; v->num = n; return v; }
-    static ValueP Str(const std::string& s) { auto v = std::make_shared<Value>(); v->type = VType::STRING; v->str = s; return v; }
-    static ValueP Bool(bool b) { auto v = std::make_shared<Value>(); v->type = VType::BOOL; v->boolean = b; return v; }
-    static ValueP Nil() { auto v = std::make_shared<Value>(); v->type = VType::NIL; return v; }
-    static ValueP Arr(std::vector<ValueP> a) { auto v = std::make_shared<Value>(); v->type = VType::ARRAY; v->arr = a; return v; }
+    static ValuePtr mkNum(double n) { auto v = std::make_shared<Value>(); v->type = VType::Number; v->num = n; return v; }
+    static ValuePtr mkStr(const std::string& s) { auto v = std::make_shared<Value>(); v->type = VType::String; v->str = s; return v; }
+    static ValuePtr mkBool(bool b) { auto v = std::make_shared<Value>(); v->type = VType::Bool; v->boolean = b; return v; }
+    static ValuePtr mkNull() { auto v = std::make_shared<Value>(); v->type = VType::Null; return v; }
+    static ValuePtr mkArr(std::vector<ValuePtr> a) { auto v = std::make_shared<Value>(); v->type = VType::Array; v->arr = std::move(a); return v; }
 
     bool truthy() const {
-        if (type == VType::BOOL) return boolean;
-        if (type == VType::NIL) return false;
-        if (type == VType::NUMBER) return num != 0;
-        if (type == VType::STRING) return !str.empty();
-        return true;
+        switch (type) {
+            case VType::Number: return num != 0;
+            case VType::String: return !str.empty();
+            case VType::Bool: return boolean;
+            case VType::Null: return false;
+            case VType::Array: return !arr.empty();
+        }
+        return false;
     }
 
-    std::string toDisplay() const {
-        std::ostringstream ss;
+    std::string toDisplayString() const {
+        std::ostringstream oss;
         switch (type) {
-            case VType::NUMBER: {
-                if (num == (long long)num) ss << (long long)num;
-                else ss << num;
-                return ss.str();
+            case VType::Number: {
+                if (num == (long long)num) oss << (long long)num;
+                else oss << num;
+                return oss.str();
             }
-            case VType::STRING: return str;
-            case VType::BOOL: return boolean ? "true" : "false";
-            case VType::NIL: return "nil";
-            case VType::ARRAY: {
-                std::string out = "[";
+            case VType::String: return str;
+            case VType::Bool: return boolean ? "true" : "false";
+            case VType::Null: return "null";
+            case VType::Array: {
+                oss << "[";
                 for (size_t i = 0; i < arr.size(); i++) {
-                    out += arr[i]->toDisplay();
-                    if (i + 1 < arr.size()) out += ", ";
+                    if (i) oss << ", ";
+                    oss << arr[i]->toDisplayString();
                 }
-                out += "]";
-                return out;
+                oss << "]";
+                return oss.str();
             }
-            case VType::FUNCTION: return "<function>";
         }
         return "";
     }
 };
 
-struct Environment : std::enable_shared_from_this<Environment> {
-    std::unordered_map<std::string, ValueP> vars;
-    EnvP parent;
+// ==========================================================================
+// Environment (scopes)
+// ==========================================================================
+class Environment {
+public:
+    Environment(std::shared_ptr<Environment> parent = nullptr) : parent(parent) {}
 
-    Environment(EnvP p = nullptr) : parent(p) {}
+    void define(const std::string& name, ValuePtr v) {
+        vars[name] = v;
+    }
 
-    ValueP get(const std::string& name, int line) {
-        if (vars.count(name)) return vars[name];
+    bool assign(const std::string& name, ValuePtr v) {
+        if (vars.find(name) != vars.end()) {
+            vars[name] = v;
+            return true;
+        }
+        if (parent) return parent->assign(name, v);
+        return false;
+    }
+
+    ValuePtr get(const std::string& name, int line) {
+        auto it = vars.find(name);
+        if (it != vars.end()) return it->second;
         if (parent) return parent->get(name, line);
-        throw LangError("Undefined variable '" + name + "'", line);
+        throw MalikError("Undefined variable '" + name + "'", line);
     }
-    void define(const std::string& name, ValueP v) { vars[name] = v; }
-    void assign(const std::string& name, ValueP v, int line) {
-        if (vars.count(name)) { vars[name] = v; return; }
-        if (parent) { parent->assign(name, v, line); return; }
-        throw LangError("Cannot assign to undefined variable '" + name + "'", line);
+
+    bool has(const std::string& name) {
+        if (vars.find(name) != vars.end()) return true;
+        if (parent) return parent->has(name);
+        return false;
     }
+
+private:
+    std::unordered_map<std::string, ValuePtr> vars;
+    std::shared_ptr<Environment> parent;
 };
 
-// control-flow signal for return statements
-struct ReturnSignal { ValueP value; };
+// ==========================================================================
+// Control-flow signals (used internally via exceptions)
+// ==========================================================================
+struct ReturnSignal { ValuePtr value; };
 
-// ---------------------------------------------------------------------
-// 6. GUI RUNTIME (Windows only) - lets .z scripts create real windows,
-//    buttons, labels and textboxes, and route click events back into
-//    the interpreter by calling a named MalikLang function.
-// ---------------------------------------------------------------------
+// ==========================================================================
+// Forward declaration (GuiRuntime needs to call back into Interpreter)
+// ==========================================================================
+class Interpreter;
+
 #ifdef _WIN32
-
-class Interpreter; // fwd decl
-
-struct GuiControl {
-    HWND hwnd;
-    std::string type;        // "button", "label", "textbox"
-    std::string onClickFunc; // name of .z function to call (buttons only)
-};
-
+// ==========================================================================
+// GuiRuntime - creates real Win32 controls from MalikLang GUI built-ins.
+//
+// Supports two modes:
+//   1) Standalone: window() creates its own top-level HWND (used by run_app()).
+//   2) Embedded:   if an external parent HWND is supplied (e.g. a "Preview"
+//                  panel inside the IDE), all controls are created as
+//                  children of that panel instead of opening a new window.
+// ==========================================================================
 class GuiRuntime {
 public:
-    HWND hWindow = nullptr;
-    std::unordered_map<int, GuiControl> controls; // keyed by control id
-    int nextId = 2000;
-    Interpreter* interp = nullptr; // set by Interpreter so callbacks can run .z functions
+    Interpreter* interp = nullptr; // set by Interpreter after construction
 
-    static GuiRuntime* instance; // single active GUI runtime (one window per script run)
+    // If set before window() is called, GUI controls render INSIDE this
+    // existing panel instead of creating a new top-level window.
+    HWND embedParent = nullptr;
 
-    static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-        GuiRuntime* self = GuiRuntime::instance;
-        switch (msg) {
-            case WM_COMMAND: {
-                if (self) {
-                    int id = LOWORD(wp);
-                    auto it = self->controls.find(id);
-                    if (it != self->controls.end() && !it->second.onClickFunc.empty()) {
-                        self->fireClick(it->second.onClickFunc);
-                    }
-                }
-                break;
-            }
-            case WM_CLOSE:
-                DestroyWindow(hwnd);
-                break;
-            case WM_DESTROY:
-                if (self) self->hWindow = nullptr;
-                break;
-            default:
-                return DefWindowProcW(hwnd, msg, wp, lp);
+    HWND mainWnd = nullptr;
+    bool windowCreated = false;
+    int nextCtrlId = 2001;
+
+    std::unordered_map<int, HWND> controls;          // ctrl id -> HWND
+    std::unordered_map<int, std::string> clickHandlers; // ctrl id -> function name
+
+    static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        GuiRuntime* self = nullptr;
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCT* cs = (CREATESTRUCT*)lParam;
+            self = (GuiRuntime*)cs->lpCreateParams;
+            SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)self);
+        } else {
+            self = (GuiRuntime*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
         }
-        return 0;
+
+        if (msg == WM_COMMAND && self) {
+            int id = LOWORD(wParam);
+            self->fireClick(id);
+            return 0;
+        }
+        if (msg == WM_DESTROY) {
+            if (self && self->mainWnd == hwnd) {
+                self->mainWnd = nullptr;
+                self->windowCreated = false;
+            }
+            return 0;
+        }
+        return DefWindowProc(hwnd, msg, wParam, lParam);
     }
 
-    void createWindow(const std::string& title, int w, int h);
-    int addButton(const std::string& label, int x, int y, int w, int h, const std::string& onClick);
-    int addLabel(const std::string& text, int x, int y, int w, int h);
-    int addTextbox(int x, int y, int w, int h);
-    void setText(int id, const std::string& text);
-    std::string getText(int id);
-    void runMessageLoop();
-    void fireClick(const std::string& funcName); // implemented after Interpreter is defined
-};
-
-GuiRuntime* GuiRuntime::instance = nullptr;
-
-inline void GuiRuntime::createWindow(const std::string& title, int w, int h) {
-    static bool classRegistered = false;
-    std::wstring wtitle(title.begin(), title.end()); // ASCII-safe titles for simplicity
-
-    if (!classRegistered) {
-        WNDCLASSW wc = {0};
-        wc.lpfnWndProc = GuiRuntime::WndProc;
-        wc.hInstance = GetModuleHandleW(NULL);
-        wc.lpszClassName = L"MalikLangAppWindow";
-        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    void ensureWindowClassRegistered() {
+        static bool registered = false;
+        if (registered) return;
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = WndProc;
+        wc.hInstance = GetModuleHandle(nullptr);
+        wc.lpszClassName = L"MalikLangGuiWindow";
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
         RegisterClassW(&wc);
-        classRegistered = true;
+        registered = true;
     }
 
-    hWindow = CreateWindowW(L"MalikLangAppWindow", wtitle.c_str(),
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
-        CW_USEDEFAULT, CW_USEDEFAULT, w, h, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    // Creates a new top-level window, OR if embedParent is set, just clears
+    // the embedded panel and uses it as the surface for controls.
+    void createWindow(const std::string& title, int width, int height) {
+        if (embedParent) {
+            // Embedded preview mode: destroy any previously created child
+            // controls so re-running Preview starts clean.
+            clearChildren();
+            mainWnd = embedParent;
+            windowCreated = true;
+            return;
+        }
 
-    GuiRuntime::instance = this;
-}
-
-inline int GuiRuntime::addButton(const std::string& label, int x, int y, int w, int h, const std::string& onClick) {
-    if (!hWindow) throw LangError("No window created yet - call window() first", 0);
-    int id = nextId++;
-    std::wstring wlabel(label.begin(), label.end());
-    HWND btn = CreateWindowW(L"BUTTON", wlabel.c_str(), WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-        x, y, w, h, hWindow, (HMENU)(INT_PTR)id, GetModuleHandleW(NULL), NULL);
-    controls[id] = { btn, "button", onClick };
-    return id;
-}
-
-inline int GuiRuntime::addLabel(const std::string& text, int x, int y, int w, int h) {
-    if (!hWindow) throw LangError("No window created yet - call window() first", 0);
-    int id = nextId++;
-    std::wstring wtext(text.begin(), text.end());
-    HWND lbl = CreateWindowW(L"STATIC", wtext.c_str(), WS_VISIBLE | WS_CHILD | SS_LEFT,
-        x, y, w, h, hWindow, (HMENU)(INT_PTR)id, GetModuleHandleW(NULL), NULL);
-    controls[id] = { lbl, "label", "" };
-    return id;
-}
-
-inline int GuiRuntime::addTextbox(int x, int y, int w, int h) {
-    if (!hWindow) throw LangError("No window created yet - call window() first", 0);
-    int id = nextId++;
-    HWND tb = CreateWindowW(L"EDIT", L"", WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
-        x, y, w, h, hWindow, (HMENU)(INT_PTR)id, GetModuleHandleW(NULL), NULL);
-    controls[id] = { tb, "textbox", "" };
-    return id;
-}
-
-inline void GuiRuntime::setText(int id, const std::string& text) {
-    auto it = controls.find(id);
-    if (it == controls.end()) throw LangError("setText(): invalid control id", 0);
-    std::wstring wtext(text.begin(), text.end());
-    SetWindowTextW(it->second.hwnd, wtext.c_str());
-}
-
-inline std::string GuiRuntime::getText(int id) {
-    auto it = controls.find(id);
-    if (it == controls.end()) throw LangError("getText(): invalid control id", 0);
-    wchar_t buf[2048] = {0};
-    GetWindowTextW(it->second.hwnd, buf, 2047);
-    std::wstring w(buf);
-    return std::string(w.begin(), w.end()); // ASCII-safe for simplicity
-}
-
-inline void GuiRuntime::runMessageLoop() {
-    MSG msg = {0};
-    while (GetMessageW(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+        ensureWindowClassRegistered();
+        std::wstring wtitle(title.begin(), title.end());
+        mainWnd = CreateWindowExW(
+            0, L"MalikLangGuiWindow", wtitle.c_str(),
+            WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT, CW_USEDEFAULT, width, height,
+            nullptr, nullptr, GetModuleHandle(nullptr), this
+        );
+        if (mainWnd) {
+            ShowWindow(mainWnd, SW_SHOW);
+            UpdateWindow(mainWnd);
+            windowCreated = true;
+        }
     }
-}
 
+    void clearChildren() {
+        for (auto& kv : controls) {
+            if (kv.second) DestroyWindow(kv.second);
+        }
+        controls.clear();
+        clickHandlers.clear();
+        nextCtrlId = 2001;
+    }
+
+    int addButton(const std::string& label, int x, int y, int w, int h, const std::string& handlerFn) {
+        if (!mainWnd) return -1;
+        int id = nextCtrlId++;
+        std::wstring wlabel(label.begin(), label.end());
+        HWND btn = CreateWindowExW(
+            0, L"BUTTON", wlabel.c_str(),
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            x, y, w, h, mainWnd, (HMENU)(INT_PTR)id, GetModuleHandle(nullptr), nullptr
+        );
+        controls[id] = btn;
+        clickHandlers[id] = handlerFn;
+        return id;
+    }
+
+    int addLabel(const std::string& text, int x, int y, int w, int h) {
+        if (!mainWnd) return -1;
+        int id = nextCtrlId++;
+        std::wstring wtext(text.begin(), text.end());
+        HWND lbl = CreateWindowExW(
+            0, L"STATIC", wtext.c_str(),
+            WS_CHILD | WS_VISIBLE,
+            x, y, w, h, mainWnd, (HMENU)(INT_PTR)id, GetModuleHandle(nullptr), nullptr
+        );
+        controls[id] = lbl;
+        return id;
+    }
+
+    int addTextbox(int x, int y, int w, int h) {
+        if (!mainWnd) return -1;
+        int id = nextCtrlId++;
+        HWND tb = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            x, y, w, h, mainWnd, (HMENU)(INT_PTR)id, GetModuleHandle(nullptr), nullptr
+        );
+        controls[id] = tb;
+        return id;
+    }
+
+    void setText(int id, const std::string& text) {
+        auto it = controls.find(id);
+        if (it == controls.end() || !it->second) return;
+        std::wstring wtext(text.begin(), text.end());
+        SetWindowTextW(it->second, wtext.c_str());
+    }
+
+    std::string getText(int id) {
+        auto it = controls.find(id);
+        if (it == controls.end() || !it->second) return "";
+        wchar_t buf[4096];
+        GetWindowTextW(it->second, buf, 4096);
+        std::wstring ws(buf);
+        return std::string(ws.begin(), ws.end());
+    }
+
+    // Pumps the Windows message loop. In standalone mode this blocks until
+    // the window is closed. In embedded preview mode we do NOT want to block
+    // the IDE's own message loop, so runApp() in embedded mode simply
+    // returns immediately after controls are created (the IDE's own loop
+    // continues to dispatch messages to the embedded controls).
+    void runApp() {
+        if (embedParent) {
+            return; // IDE owns the message loop; nothing to pump here.
+        }
+        MSG msg;
+        while (windowCreated && GetMessage(&msg, nullptr, 0, 0)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+    }
+
+    void fireClick(int ctrlId); // implemented after Interpreter is fully defined
+};
 #endif // _WIN32
+
+// ==========================================================================
+// Interpreter
+// ==========================================================================
+struct FuncDef {
+    std::vector<std::string> params;
+    NodePtr body;
+};
 
 class Interpreter {
 public:
-    EnvP globals = std::make_shared<Environment>();
-    std::function<void(const std::string&)> onPrint; // hook into UI console
-#ifdef _WIN32
-    GuiRuntime gui;
-#endif
-
     Interpreter() {
-        globals->define("PI", Value::Num(3.14159265358979));
+        globals = std::make_shared<Environment>();
 #ifdef _WIN32
         gui.interp = this;
 #endif
     }
 
-    void run(NodeP program) {
-        for (auto& stmt : program->children) exec(stmt, globals);
+#ifdef _WIN32
+    GuiRuntime gui;
+#endif
+
+    // Output hook: by default prints to stdout; UI layers can override this.
+    std::function<void(const std::string&)> onOutput = [](const std::string& s) {
+        std::cout << s << "\n";
+    };
+
+    void run(NodePtr program) {
+        execBlockStatements(program->list, globals);
     }
 
-    void exec(NodeP n, EnvP env) {
+    // Used by GUI callbacks (and future bundler) to invoke a user-defined
+    // function by name from outside the script's normal control flow.
+    void callUserFunctionByName(const std::string& name, std::vector<ValuePtr> args) {
+        auto it = functions.find(name);
+        if (it == functions.end()) {
+            throw MalikError("Undefined function '" + name + "'", 0);
+        }
+        callFunction(it->second, args, 0);
+    }
+
+    bool hasFunction(const std::string& name) {
+        return functions.find(name) != functions.end();
+    }
+
+private:
+    std::shared_ptr<Environment> globals;
+    std::unordered_map<std::string, FuncDef> functions;
+
+    // ---- Statement execution ----
+    void execBlockStatements(const std::vector<NodePtr>& stmts, std::shared_ptr<Environment> env) {
+        for (auto& s : stmts) execStmt(s, env);
+    }
+
+    void execStmt(NodePtr n, std::shared_ptr<Environment> env) {
         switch (n->type) {
-            case NType::LET: {
-                ValueP v = eval(n->a, env);
+            case NodeType::Let: {
+                ValuePtr v = eval(n->a, env);
                 env->define(n->name, v);
-                break;
+                return;
             }
-            case NType::PRINT: {
-                ValueP v = eval(n->a, env);
-                if (onPrint) onPrint(v->toDisplay());
-                break;
+            case NodeType::Print: {
+                ValuePtr v = eval(n->a, env);
+                onOutput(v->toDisplayString());
+                return;
             }
-            case NType::BLOCK: {
-                auto child = std::make_shared<Environment>(env);
-                for (auto& s : n->children) exec(s, child);
-                break;
+            case NodeType::If: {
+                ValuePtr c = eval(n->a, env);
+                if (c->truthy()) {
+                    execStmt(n->b, std::make_shared<Environment>(env));
+                } else if (n->c) {
+                    execStmt(n->c, std::make_shared<Environment>(env));
+                }
+                return;
             }
-            case NType::IF: {
-                ValueP c = eval(n->a, env);
-                if (c->truthy()) exec(n->b, env);
-                else if (n->c) exec(n->c, env);
-                break;
-            }
-            case NType::WHILE: {
-                int guard = 0;
+            case NodeType::While: {
                 while (eval(n->a, env)->truthy()) {
-                    exec(n->b, env);
-                    if (++guard > 5000000) throw LangError("Possible infinite loop (limit reached)", n->line);
+                    execStmt(n->b, std::make_shared<Environment>(env));
                 }
-                break;
+                return;
             }
-            case NType::FOR: {
+            case NodeType::For: {
                 auto loopEnv = std::make_shared<Environment>(env);
-                if (n->a) exec(n->a, loopEnv);
-                int guard = 0;
+                execStmt(n->a, loopEnv); // init
                 while (eval(n->b, loopEnv)->truthy()) {
-                    exec(n->d, loopEnv);
-                    eval(n->c, loopEnv);
-                    if (++guard > 5000000) throw LangError("Possible infinite loop (limit reached)", n->line);
+                    execStmt(n->d, std::make_shared<Environment>(loopEnv)); // body
+                    eval(n->c, loopEnv); // step
                 }
-                break;
+                return;
             }
-            case NType::FUNC: {
-                auto v = std::make_shared<Value>();
-                v->type = VType::FUNCTION;
-                v->funcNode = n;
-                v->closure = env;
-                env->define(n->name, v);
-                break;
+            case NodeType::FuncDecl: {
+                FuncDef fd;
+                fd.params = n->params;
+                fd.body = n->a;
+                functions[n->name] = fd;
+                return;
             }
-            case NType::RETURN: {
-                ValueP v = n->a ? eval(n->a, env) : Value::Nil();
+            case NodeType::Return: {
+                ValuePtr v = n->a ? eval(n->a, env) : Value::mkNull();
                 throw ReturnSignal{v};
             }
-            case NType::EXPR_STMT: {
+            case NodeType::Block: {
+                execBlockStatements(n->list, env);
+                return;
+            }
+            case NodeType::ExprStmt: {
                 eval(n->a, env);
-                break;
+                return;
             }
             default:
-                throw LangError("Cannot execute this node as a statement", n->line);
+                throw MalikError("Unknown statement type", n->line);
         }
     }
 
-    ValueP eval(NodeP n, EnvP env) {
+    // ---- Expression evaluation ----
+    ValuePtr eval(NodePtr n, std::shared_ptr<Environment> env) {
         switch (n->type) {
-            case NType::NUMBER: return Value::Num(n->numVal);
-            case NType::STRING: return Value::Str(n->strVal);
-            case NType::BOOL: return Value::Bool(n->boolVal);
-            case NType::NIL: return Value::Nil();
-            case NType::IDENT: return env->get(n->name, n->line);
-            case NType::ARRAY: {
-                std::vector<ValueP> items;
-                for (auto& c : n->children) items.push_back(eval(c, env));
-                return Value::Arr(items);
+            case NodeType::Number: return Value::mkNum(n->numVal);
+            case NodeType::String: return Value::mkStr(n->strVal);
+            case NodeType::Bool: return Value::mkBool(n->boolVal);
+            case NodeType::Null: return Value::mkNull();
+            case NodeType::Ident: return env->get(n->name, n->line);
+
+            case NodeType::ArrayLit: {
+                std::vector<ValuePtr> items;
+                for (auto& e : n->list) items.push_back(eval(e, env));
+                return Value::mkArr(items);
             }
-            case NType::ASSIGN: {
-                ValueP v = eval(n->b, env);
-                if (n->a->type == NType::IDENT) {
-                    env->assign(n->a->name, v, n->line);
-                } else if (n->a->type == NType::INDEX) {
-                    ValueP arr = eval(n->a->a, env);
-                    ValueP idx = eval(n->a->b, env);
-                    if (arr->type != VType::ARRAY) throw LangError("Cannot index a non-array value", n->line);
-                    int i = (int)idx->num;
-                    if (i < 0 || i >= (int)arr->arr.size()) throw LangError("Array index out of bounds", n->line);
-                    arr->arr[i] = v;
-                } else {
-                    throw LangError("Invalid assignment target", n->line);
+
+            case NodeType::Assign: {
+                ValuePtr v = eval(n->a, env);
+                if (!env->assign(n->name, v)) {
+                    throw MalikError("Undefined variable '" + n->name + "'", n->line);
                 }
                 return v;
             }
-            case NType::INDEX: {
-                ValueP arr = eval(n->a, env);
-                ValueP idx = eval(n->b, env);
-                if (arr->type == VType::ARRAY) {
-                    int i = (int)idx->num;
-                    if (i < 0 || i >= (int)arr->arr.size()) throw LangError("Array index out of bounds", n->line);
-                    return arr->arr[i];
-                } else if (arr->type == VType::STRING) {
-                    int i = (int)idx->num;
-                    if (i < 0 || i >= (int)arr->str.size()) throw LangError("String index out of bounds", n->line);
-                    return Value::Str(std::string(1, arr->str[i]));
+
+            case NodeType::IndexAssign: {
+                ValuePtr arrVal = eval(n->a, env);
+                ValuePtr idxVal = eval(n->b, env);
+                ValuePtr val = eval(n->c, env);
+                if (arrVal->type != VType::Array) throw MalikError("Cannot index non-array value", n->line);
+                int idx = (int)idxVal->num;
+                if (idx < 0 || idx >= (int)arrVal->arr.size())
+                    throw MalikError("Array index out of bounds", n->line);
+                arrVal->arr[idx] = val;
+                return val;
+            }
+
+            case NodeType::Index: {
+                ValuePtr arrVal = eval(n->a, env);
+                ValuePtr idxVal = eval(n->b, env);
+                if (arrVal->type == VType::Array) {
+                    int idx = (int)idxVal->num;
+                    if (idx < 0 || idx >= (int)arrVal->arr.size())
+                        throw MalikError("Array index out of bounds", n->line);
+                    return arrVal->arr[idx];
+                } else if (arrVal->type == VType::String) {
+                    int idx = (int)idxVal->num;
+                    if (idx < 0 || idx >= (int)arrVal->str.size())
+                        throw MalikError("String index out of bounds", n->line);
+                    return Value::mkStr(std::string(1, arrVal->str[idx]));
                 }
-                throw LangError("Cannot index this value type", n->line);
+                throw MalikError("Cannot index this value", n->line);
             }
-            case NType::UNARY: {
-                ValueP v = eval(n->a, env);
-                if (n->name == "-") return Value::Num(-v->num);
-                if (n->name == "!") return Value::Bool(!v->truthy());
-                throw LangError("Unknown unary operator", n->line);
+
+            case NodeType::Unary: {
+                ValuePtr v = eval(n->a, env);
+                if (n->name == "-") {
+                    if (v->type != VType::Number) throw MalikError("Unary '-' requires a number", n->line);
+                    return Value::mkNum(-v->num);
+                }
+                if (n->name == "!") {
+                    return Value::mkBool(!v->truthy());
+                }
+                throw MalikError("Unknown unary operator", n->line);
             }
-            case NType::BINOP: return evalBinop(n, env);
-            case NType::CALL: return evalCall(n, env);
+
+            case NodeType::Logical: {
+                ValuePtr l = eval(n->a, env);
+                if (n->name == "&&") {
+                    if (!l->truthy()) return Value::mkBool(false);
+                    return Value::mkBool(eval(n->b, env)->truthy());
+                } else { // ||
+                    if (l->truthy()) return Value::mkBool(true);
+                    return Value::mkBool(eval(n->b, env)->truthy());
+                }
+            }
+
+            case NodeType::Binary: return evalBinary(n, env);
+
+            case NodeType::Call: return evalCall(n, env);
+
             default:
-                throw LangError("Cannot evaluate this node as an expression", n->line);
+                throw MalikError("Unknown expression type", n->line);
         }
     }
 
-    ValueP evalBinop(NodeP n, EnvP env) {
+    ValuePtr evalBinary(NodePtr n, std::shared_ptr<Environment> env) {
+        ValuePtr l = eval(n->a, env);
+        ValuePtr r = eval(n->b, env);
         const std::string& op = n->name;
 
-        if (op == "&&") { ValueP l = eval(n->a, env); if (!l->truthy()) return Value::Bool(false); return Value::Bool(eval(n->b, env)->truthy()); }
-        if (op == "||") { ValueP l = eval(n->a, env); if (l->truthy()) return Value::Bool(true); return Value::Bool(eval(n->b, env)->truthy()); }
-
-        ValueP l = eval(n->a, env);
-        ValueP r = eval(n->b, env);
-
-        if (op == "+") {
-            if (l->type == VType::STRING || r->type == VType::STRING)
-                return Value::Str(l->toDisplay() + r->toDisplay());
-            return Value::Num(l->num + r->num);
+        // String concatenation with '+'
+        if (op == "+" && (l->type == VType::String || r->type == VType::String)) {
+            return Value::mkStr(l->toDisplayString() + r->toDisplayString());
         }
-        if (op == "-") return Value::Num(l->num - r->num);
-        if (op == "*") return Value::Num(l->num * r->num);
+
+        // Equality works across types
+        if (op == "==") return Value::mkBool(valuesEqual(l, r));
+        if (op == "!=") return Value::mkBool(!valuesEqual(l, r));
+
+        if (l->type != VType::Number || r->type != VType::Number) {
+            throw MalikError("Operator '" + op + "' requires numbers", n->line);
+        }
+        double a = l->num, b = r->num;
+        if (op == "+") return Value::mkNum(a + b);
+        if (op == "-") return Value::mkNum(a - b);
+        if (op == "*") return Value::mkNum(a * b);
         if (op == "/") {
-            if (r->num == 0) throw LangError("Division by zero", n->line);
-            return Value::Num(l->num / r->num);
+            if (b == 0) throw MalikError("Division by zero", n->line);
+            return Value::mkNum(a / b);
         }
         if (op == "%") {
-            if (r->num == 0) throw LangError("Division by zero (modulo)", n->line);
-            return Value::Num(std::fmod(l->num, r->num));
+            if (b == 0) throw MalikError("Division by zero (modulo)", n->line);
+            return Value::mkNum(std::fmod(a, b));
         }
-        if (op == "==") return Value::Bool(valuesEqual(l, r));
-        if (op == "!=") return Value::Bool(!valuesEqual(l, r));
-        if (op == "<")  return Value::Bool(l->num < r->num);
-        if (op == ">")  return Value::Bool(l->num > r->num);
-        if (op == "<=") return Value::Bool(l->num <= r->num);
-        if (op == ">=") return Value::Bool(l->num >= r->num);
+        if (op == "<") return Value::mkBool(a < b);
+        if (op == ">") return Value::mkBool(a > b);
+        if (op == "<=") return Value::mkBool(a <= b);
+        if (op == ">=") return Value::mkBool(a >= b);
 
-        throw LangError("Unknown operator '" + op + "'", n->line);
+        throw MalikError("Unknown operator '" + op + "'", n->line);
     }
 
-    bool valuesEqual(ValueP l, ValueP r) {
-        if (l->type != r->type) return false;
+    bool valuesEqual(ValuePtr l, ValuePtr r) {
+        if (l->type != r->type) {
+            // allow numeric/bool loose comparisons to fail cleanly (strict types)
+            return false;
+        }
         switch (l->type) {
-            case VType::NUMBER: return l->num == r->num;
-            case VType::STRING: return l->str == r->str;
-            case VType::BOOL: return l->boolean == r->boolean;
-            case VType::NIL: return true;
-            default: return l.get() == r.get();
+            case VType::Number: return l->num == r->num;
+            case VType::String: return l->str == r->str;
+            case VType::Bool: return l->boolean == r->boolean;
+            case VType::Null: return true;
+            case VType::Array: return false; // arrays compare by identity-ish; not deep-equal here
         }
+        return false;
     }
 
-    ValueP evalCall(NodeP n, EnvP env) {
-        // built-in functions first
-        if (n->a->type == NType::IDENT) {
-            const std::string& fname = n->a->name;
-            std::vector<ValueP> args;
-            for (auto& a : n->children) args.push_back(eval(a, env));
+    void callFunction(FuncDef& fd, std::vector<ValuePtr>& args, int line) {
+        if (args.size() != fd.params.size()) {
+            throw MalikError("Function expects " + std::to_string(fd.params.size()) +
+                              " argument(s) but got " + std::to_string(args.size()), line);
+        }
+        auto callEnv = std::make_shared<Environment>(globals);
+        for (size_t i = 0; i < fd.params.size(); i++) {
+            callEnv->define(fd.params[i], args[i]);
+        }
+        try {
+            execStmt(fd.body, callEnv);
+        } catch (ReturnSignal& rs) {
+            lastReturnValue = rs.value;
+            return;
+        }
+        lastReturnValue = Value::mkNull();
+    }
 
-            if (fname == "len") {
-                if (args.empty()) throw LangError("len() needs 1 argument", n->line);
-                if (args[0]->type == VType::ARRAY) return Value::Num((double)args[0]->arr.size());
-                if (args[0]->type == VType::STRING) return Value::Num((double)args[0]->str.size());
-                throw LangError("len() expects array or string", n->line);
+    ValuePtr lastReturnValue;
+
+    ValuePtr evalCall(NodePtr n, std::shared_ptr<Environment> env) {
+        // Evaluate args first
+        std::vector<ValuePtr> args;
+        for (auto& a : n->list) args.push_back(eval(a, env));
+
+        const std::string& name = n->name;
+
+        // ---- Built-in functions ----
+        if (name == "len") {
+            requireArgs(args, 1, name, n->line);
+            if (args[0]->type == VType::Array) return Value::mkNum((double)args[0]->arr.size());
+            if (args[0]->type == VType::String) return Value::mkNum((double)args[0]->str.size());
+            throw MalikError("len() requires an array or string", n->line);
+        }
+        if (name == "str") {
+            requireArgs(args, 1, name, n->line);
+            return Value::mkStr(args[0]->toDisplayString());
+        }
+        if (name == "num") {
+            requireArgs(args, 1, name, n->line);
+            if (args[0]->type == VType::Number) return args[0];
+            if (args[0]->type == VType::String) {
+                try { return Value::mkNum(std::stod(args[0]->str)); }
+                catch (...) { throw MalikError("Cannot convert string to number: '" + args[0]->str + "'", n->line); }
             }
-            if (fname == "str") {
-                if (args.empty()) throw LangError("str() needs 1 argument", n->line);
-                return Value::Str(args[0]->toDisplay());
-            }
-            if (fname == "num") {
-                if (args.empty()) throw LangError("num() needs 1 argument", n->line);
-                try { return Value::Num(std::stod(args[0]->toDisplay())); }
-                catch (...) { throw LangError("num(): cannot convert '" + args[0]->toDisplay() + "' to number", n->line); }
-            }
-            if (fname == "push") {
-                if (args.size() < 2 || args[0]->type != VType::ARRAY) throw LangError("push() expects (array, value)", n->line);
-                args[0]->arr.push_back(args[1]);
-                return args[0];
-            }
-            if (fname == "sqrt") return Value::Num(std::sqrt(args.empty() ? 0 : args[0]->num));
-            if (fname == "abs")  return Value::Num(std::fabs(args.empty() ? 0 : args[0]->num));
-            if (fname == "floor") return Value::Num(std::floor(args.empty() ? 0 : args[0]->num));
-            if (fname == "round") return Value::Num(std::round(args.empty() ? 0 : args[0]->num));
+            throw MalikError("num() requires a string or number", n->line);
+        }
+        if (name == "sqrt") {
+            requireArgs(args, 1, name, n->line);
+            checkNumber(args[0], name, n->line);
+            if (args[0]->num < 0) throw MalikError("sqrt() of negative number", n->line);
+            return Value::mkNum(std::sqrt(args[0]->num));
+        }
+        if (name == "abs") {
+            requireArgs(args, 1, name, n->line);
+            checkNumber(args[0], name, n->line);
+            return Value::mkNum(std::fabs(args[0]->num));
+        }
+        if (name == "floor") {
+            requireArgs(args, 1, name, n->line);
+            checkNumber(args[0], name, n->line);
+            return Value::mkNum(std::floor(args[0]->num));
+        }
+        if (name == "round") {
+            requireArgs(args, 1, name, n->line);
+            checkNumber(args[0], name, n->line);
+            return Value::mkNum(std::round(args[0]->num));
+        }
+        if (name == "push") {
+            requireArgs(args, 2, name, n->line);
+            if (args[0]->type != VType::Array) throw MalikError("push() requires an array as first argument", n->line);
+            args[0]->arr.push_back(args[1]);
+            return args[0];
+        }
 
 #ifdef _WIN32
-            // ---- GUI built-ins (Windows only) ----
-            if (fname == "window") {
-                if (args.size() < 3) throw LangError("window() expects (title, width, height)", n->line);
-                gui.createWindow(args[0]->toDisplay(), (int)args[1]->num, (int)args[2]->num);
-                return Value::Nil();
-            }
-            if (fname == "button") {
-                if (args.size() < 6) throw LangError("button() expects (label, x, y, w, h, onClickFuncName)", n->line);
-                int id = gui.addButton(args[0]->toDisplay(), (int)args[1]->num, (int)args[2]->num,
-                                        (int)args[3]->num, (int)args[4]->num, args[5]->toDisplay());
-                return Value::Num(id);
-            }
-            if (fname == "label") {
-                if (args.size() < 5) throw LangError("label() expects (text, x, y, w, h)", n->line);
-                int id = gui.addLabel(args[0]->toDisplay(), (int)args[1]->num, (int)args[2]->num,
-                                       (int)args[3]->num, (int)args[4]->num);
-                return Value::Num(id);
-            }
-            if (fname == "textbox") {
-                if (args.size() < 4) throw LangError("textbox() expects (x, y, w, h)", n->line);
-                int id = gui.addTextbox((int)args[0]->num, (int)args[1]->num, (int)args[2]->num, (int)args[3]->num);
-                return Value::Num(id);
-            }
-            if (fname == "set_text") {
-                if (args.size() < 2) throw LangError("set_text() expects (controlId, text)", n->line);
-                gui.setText((int)args[0]->num, args[1]->toDisplay());
-                return Value::Nil();
-            }
-            if (fname == "get_text") {
-                if (args.empty()) throw LangError("get_text() expects (controlId)", n->line);
-                return Value::Str(gui.getText((int)args[0]->num));
-            }
-            if (fname == "run_app") {
-                gui.runMessageLoop();
-                return Value::Nil();
-            }
+        // ---- GUI built-ins (Windows only) ----
+        if (name == "window") {
+            requireArgs(args, 3, name, n->line);
+            if (args[0]->type != VType::String) throw MalikError("window() title must be a string", n->line);
+            checkNumber(args[1], name, n->line);
+            checkNumber(args[2], name, n->line);
+            gui.createWindow(args[0]->str, (int)args[1]->num, (int)args[2]->num);
+            return Value::mkNull();
+        }
+        if (name == "button") {
+            requireArgs(args, 6, name, n->line);
+            if (args[0]->type != VType::String) throw MalikError("button() label must be a string", n->line);
+            if (args[5]->type != VType::String) throw MalikError("button() handler name must be a string", n->line);
+            int id = gui.addButton(args[0]->str, (int)args[1]->num, (int)args[2]->num,
+                                    (int)args[3]->num, (int)args[4]->num, args[5]->str);
+            return Value::mkNum(id);
+        }
+        if (name == "label") {
+            requireArgs(args, 5, name, n->line);
+            if (args[0]->type != VType::String) throw MalikError("label() text must be a string", n->line);
+            int id = gui.addLabel(args[0]->str, (int)args[1]->num, (int)args[2]->num,
+                                   (int)args[3]->num, (int)args[4]->num);
+            return Value::mkNum(id);
+        }
+        if (name == "textbox") {
+            requireArgs(args, 4, name, n->line);
+            int id = gui.addTextbox((int)args[0]->num, (int)args[1]->num, (int)args[2]->num, (int)args[3]->num);
+            return Value::mkNum(id);
+        }
+        if (name == "set_text") {
+            requireArgs(args, 2, name, n->line);
+            checkNumber(args[0], name, n->line);
+            gui.setText((int)args[0]->num, args[1]->toDisplayString());
+            return Value::mkNull();
+        }
+        if (name == "get_text") {
+            requireArgs(args, 1, name, n->line);
+            checkNumber(args[0], name, n->line);
+            return Value::mkStr(gui.getText((int)args[0]->num));
+        }
+        if (name == "run_app") {
+            requireArgs(args, 0, name, n->line);
+            gui.runApp();
+            return Value::mkNull();
+        }
 #endif
 
-            // user-defined function?
-            ValueP callee = env->get(fname, n->line);
-            return callUserFunction(callee, args, n->line);
+        // ---- User-defined functions ----
+        auto it = functions.find(name);
+        if (it != functions.end()) {
+            callFunction(it->second, args, n->line);
+            return lastReturnValue;
         }
 
-        ValueP callee = eval(n->a, env);
-        std::vector<ValueP> args;
-        for (auto& a : n->children) args.push_back(eval(a, env));
-        return callUserFunction(callee, args, n->line);
+        throw MalikError("Undefined function '" + name + "'", n->line);
     }
 
-    ValueP callUserFunction(ValueP callee, std::vector<ValueP>& args, int line) {
-        if (callee->type != VType::FUNCTION) throw LangError("This value is not callable", line);
-        NodeP fn = callee->funcNode;
-        auto fnEnv = std::make_shared<Environment>(callee->closure);
-
-        for (size_t i = 0; i < fn->params.size(); i++) {
-            ValueP argVal = i < args.size() ? args[i] : Value::Nil();
-            fnEnv->define(fn->params[i], argVal);
+    void requireArgs(std::vector<ValuePtr>& args, size_t count, const std::string& fn, int line) {
+        if (args.size() != count) {
+            throw MalikError(fn + "() expects " + std::to_string(count) +
+                              " argument(s) but got " + std::to_string(args.size()), line);
         }
-
-        try {
-            for (auto& s : fn->a->children) exec(s, fnEnv);
-        } catch (ReturnSignal& rs) {
-            return rs.value;
-        }
-        return Value::Nil();
+    }
+    void checkNumber(ValuePtr v, const std::string& fn, int line) {
+        if (v->type != VType::Number) throw MalikError(fn + "() requires a number argument", line);
     }
 };
 
 #ifdef _WIN32
-// Defined here (after Interpreter) because it needs to call back into the
-// interpreter's global environment to run the .z click-handler function.
-inline void GuiRuntime::fireClick(const std::string& funcName) {
-    if (!interp) return;
+// Implemented here because it needs Interpreter to be a complete type.
+inline void GuiRuntime::fireClick(int ctrlId) {
+    auto it = clickHandlers.find(ctrlId);
+    if (it == clickHandlers.end() || !interp) return;
     try {
-        ValueP fn = interp->globals->get(funcName, 0);
-        std::vector<ValueP> noArgs;
-        interp->callUserFunction(fn, noArgs, 0);
-    } catch (LangError& e) {
-        if (interp->onPrint) interp->onPrint("GUI Error (line " + std::to_string(e.line) + "): " + e.what());
-    } catch (std::exception& e) {
-        if (interp->onPrint) interp->onPrint(std::string("GUI Fatal Error: ") + e.what());
+        interp->callUserFunctionByName(it->second, {});
+    } catch (MalikError& e) {
+        std::string msg = "GUI handler error (line " + std::to_string(e.line) + "): " + e.what();
+        std::wstring wmsg(msg.begin(), msg.end());
+        MessageBoxW(mainWnd, wmsg.c_str(), L"MalikLang Error", MB_OK | MB_ICONERROR);
+    } catch (...) {
+        MessageBoxW(mainWnd, L"Unknown error in click handler", L"MalikLang Error", MB_OK | MB_ICONERROR);
     }
 }
 #endif
 
-// ====================== STUDIO UI ======================
-// ---------------------------------------------------------------------
-// Globals
-// ---------------------------------------------------------------------
-HWND hMainWnd, hCodeEdit, hOutputEdit, hStatusBar, hLineNumbers;
-HFONT hCodeFont, hUIFont;
-HBRUSH hBgBrush, hEditBgBrush;
-std::wstring currentFilePath = L"";
-bool fileDirty = false;
-
-#define ID_EDITOR        101
-#define ID_OUTPUT        102
-#define ID_RUN_BTN       103
-#define ID_CLEAR_BTN     104
-#define ID_LINENUMS      105
-
-#define ID_MENU_NEW      201
-#define ID_MENU_OPEN     202
-#define ID_MENU_SAVE     203
-#define ID_MENU_SAVEAS   204
-#define ID_MENU_EXIT     205
-#define ID_MENU_RUN      206
-#define ID_MENU_CLEAR    207
-#define ID_MENU_ABOUT    208
-
-// Color scheme: dark professional (navy/charcoal + cyan-green accent)
-#define COLOR_BG        RGB(24, 26, 32)
-#define COLOR_EDIT_BG   RGB(30, 33, 41)
-#define COLOR_EDIT_FG   RGB(220, 224, 230)
-#define COLOR_ACCENT    RGB(0, 200, 170)
-#define COLOR_OUTPUT_BG RGB(18, 20, 25)
-#define COLOR_OUTPUT_FG RGB(140, 235, 200)
-#define COLOR_LINENUM_BG RGB(22, 24, 29)
-#define COLOR_LINENUM_FG RGB(100, 105, 115)
-
-// ---------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------
-std::string wstrToStr(const std::wstring& w) {
-    if (w.empty()) return "";
-    int sz = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string out(sz, 0);
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &out[0], sz, nullptr, nullptr);
-    if (!out.empty() && out.back() == '\0') out.pop_back();
-    return out;
+// ==========================================================================
+// Convenience entry point
+// ==========================================================================
+inline void runMalikLangSource(const std::string& source,
+                                std::function<void(const std::string&)> outputFn = nullptr) {
+    Lexer lexer(source);
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parseProgram();
+    Interpreter interp;
+    if (outputFn) interp.onOutput = outputFn;
+    interp.run(program);
 }
-std::wstring strToWstr(const std::string& s) {
+
+// ========================== STUDIO UI BEGINS HERE ==========================
+// ==========================================================================
+// MalikLang Studio - Professional Win32 IDE
+// Dark theme, code editor, file Save/Open, Run (console output),
+// and a Preview panel that renders GUI controls inline (button-triggered).
+// ==========================================================================
+#include <windows.h>
+#include <commctrl.h>
+#include <commdlg.h>
+#include <string>
+#include <sstream>
+#include <vector>
+
+#pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "comdlg32.lib")
+
+// ---- Control IDs ----
+#define ID_EDITOR        101
+#define ID_CONSOLE       102
+#define ID_BTN_RUN       103
+#define ID_BTN_SAVE      104
+#define ID_BTN_OPEN      105
+#define ID_BTN_PREVIEW   106
+#define ID_STATUSBAR     107
+#define ID_PREVIEW_PANEL 108
+
+// Preview panel's dynamic GUI controls start at 2001 (GuiRuntime default).
+
+static HWND g_mainWnd = nullptr;
+static HWND g_editor = nullptr;
+static HWND g_console = nullptr;
+static HWND g_previewPanel = nullptr;
+static HWND g_statusBar = nullptr;
+static HWND g_btnRun = nullptr;
+static HWND g_btnSave = nullptr;
+static HWND g_btnOpen = nullptr;
+static HWND g_btnPreview = nullptr;
+static HFONT g_fontUI = nullptr;
+static HFONT g_fontMono = nullptr;
+static HBRUSH g_bgBrush = nullptr;
+static HBRUSH g_panelBrush = nullptr;
+static std::wstring g_currentFilePath;
+
+static const COLORREF COL_BG        = RGB(30, 30, 35);
+static const COLORREF COL_PANEL     = RGB(40, 40, 46);
+static const COLORREF COL_TEXT      = RGB(220, 220, 225);
+static const COLORREF COL_EDITOR_BG = RGB(24, 24, 28);
+
+std::string wideToUtf8(const std::wstring& w) {
+    if (w.empty()) return "";
+    int sz = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string s(sz, 0);
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], sz, nullptr, nullptr);
+    return s;
+}
+
+std::wstring utf8ToWide(const std::string& s) {
     if (s.empty()) return L"";
-    int sz = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    std::wstring out(sz, 0);
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &out[0], sz);
-    if (!out.empty() && out.back() == L'\0') out.pop_back();
-    return out;
+    int sz = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    std::wstring w(sz, 0);
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], sz);
+    return w;
 }
 
 std::string getEditorText() {
-    int len = GetWindowTextLengthW(hCodeEdit);
+    int len = GetWindowTextLengthW(g_editor);
     std::wstring buf(len + 1, 0);
-    GetWindowTextW(hCodeEdit, &buf[0], len + 1);
+    GetWindowTextW(g_editor, &buf[0], len + 1);
     buf.resize(len);
-    return wstrToStr(buf);
+    return wideToUtf8(buf);
 }
 
-void setStatus(const std::wstring& text) {
-    SendMessageW(hStatusBar, SB_SETTEXT, 0, (LPARAM)text.c_str());
+void appendConsole(const std::string& line) {
+    int len = GetWindowTextLengthW(g_console);
+    SendMessageW(g_console, EM_SETSEL, (WPARAM)len, (LPARAM)len);
+    std::wstring wline = utf8ToWide(line + "\r\n");
+    SendMessageW(g_console, EM_REPLACESEL, FALSE, (LPARAM)wline.c_str());
 }
 
-void updateTitle() {
-    std::wstring name = currentFilePath.empty() ? L"Untitled.z" : currentFilePath;
-    size_t slash = name.find_last_of(L"\\/");
-    if (slash != std::wstring::npos) name = name.substr(slash + 1);
-    std::wstring title = L"MalikLang Studio - " + name + (fileDirty ? L" *" : L"");
-    SetWindowTextW(hMainWnd, title.c_str());
+void clearConsole() {
+    SetWindowTextW(g_console, L"");
 }
 
-void appendOutput(const std::string& text, bool isError = false) {
-    int len = GetWindowTextLengthW(hOutputEdit);
-    SendMessageW(hOutputEdit, EM_SETSEL, len, len);
-    std::wstring wtext = strToWstr(text) + L"\r\n";
-    SendMessageW(hOutputEdit, EM_REPLACESEL, FALSE, (LPARAM)wtext.c_str());
+void setStatus(const std::string& text) {
+    std::wstring w = utf8ToWide(text);
+    SendMessageW(g_statusBar, SB_SETTEXTW, 0, (LPARAM)w.c_str());
 }
 
-void clearOutput() {
-    SetWindowTextW(hOutputEdit, L"");
-}
-
-// ---------------------------------------------------------------------
-// Line number gutter painting
-// ---------------------------------------------------------------------
-void updateLineNumbers() {
-    int lineCount = (int)SendMessageW(hCodeEdit, EM_GETLINECOUNT, 0, 0);
-    std::wstring nums;
-    for (int i = 1; i <= lineCount; i++) {
-        nums += std::to_wstring(i) + L"\r\n";
-    }
-    SetWindowTextW(hLineNumbers, nums.c_str());
-
-    // Sync gutter scroll with editor's current first visible line
-    int firstVisible = (int)SendMessageW(hCodeEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
-    int gutterFirstVisible = (int)SendMessageW(hLineNumbers, EM_GETFIRSTVISIBLELINE, 0, 0);
-    int delta = firstVisible - gutterFirstVisible;
-    if (delta != 0) SendMessageW(hLineNumbers, EM_LINESCROLL, 0, delta);
-}
-
-// ---------------------------------------------------------------------
-// Run the code through the MalikLang engine
-// ---------------------------------------------------------------------
-void runCode() {
-    clearOutput();
-    std::string code = getEditorText();
-    setStatus(L"Running...");
-
-    appendOutput("=== MalikLang Output ===");
-    DWORD startTime = GetTickCount();
-
+// ---- Run: executes the script, output goes to the console panel ----
+void doRun() {
+    clearConsole();
+    std::string src = getEditorText();
     try {
-        Lexer lex(code);
-        auto tokens = lex.tokenize();
+        Lexer lexer(src);
+        auto tokens = lexer.tokenize();
+        Parser parser(tokens);
+        auto program = parser.parseProgram();
+        Interpreter interp;
+        interp.onOutput = [](const std::string& s) { appendConsole(s); };
+        interp.run(program);
+        setStatus("Run completed successfully.");
+    } catch (MalikError& e) {
+        std::ostringstream oss;
+        oss << "Error (line " << e.line << "): " << e.what();
+        appendConsole(oss.str());
+        setStatus("Run failed - see console for error.");
+    } catch (std::exception& e) {
+        appendConsole(std::string("Unexpected error: ") + e.what());
+        setStatus("Run failed.");
+    }
+}
+
+// ---- Preview: runs the script with GUI controls embedded inside the
+//      preview panel instead of opening a separate window. Triggered only
+//      by the Preview button (not live/automatic), per requirements. ----
+void clearPreviewPanel() {
+    HWND child = GetWindow(g_previewPanel, GW_CHILD);
+    while (child) {
+        HWND next = GetWindow(child, GW_HWNDNEXT);
+        DestroyWindow(child);
+        child = next;
+    }
+}
+
+// Keep the interpreter alive after doPreview() returns, so that button
+// click callbacks (fired later from the message loop) still work.
+static std::shared_ptr<Interpreter> g_previewInterp;
+
+void doPreview() {
+    clearPreviewPanel();
+    clearConsole();
+    std::string src = getEditorText();
+    try {
+        Lexer lexer(src);
+        auto tokens = lexer.tokenize();
         Parser parser(tokens);
         auto program = parser.parseProgram();
 
-        Interpreter interp;
-        interp.onPrint = [](const std::string& s) { appendOutput(s); };
-        interp.run(program);
+        g_previewInterp = std::make_shared<Interpreter>();
+        g_previewInterp->onOutput = [](const std::string& s) { appendConsole(s); };
 
-        DWORD elapsed = GetTickCount() - startTime;
-        appendOutput("");
-        appendOutput("--- Finished successfully in " + std::to_string(elapsed) + " ms ---");
-        setStatus(L"Ready - Run completed successfully");
-    } catch (LangError& e) {
-        appendOutput("");
-        appendOutput("ERROR (line " + std::to_string(e.line) + "): " + std::string(e.what()));
-        setStatus(L"Run failed - see console for error");
+        // Embed mode: window()/button()/label()/textbox() render as
+        // children of the preview panel instead of opening a new window.
+        g_previewInterp->gui.embedParent = g_previewPanel;
+
+        g_previewInterp->run(program);
+        setStatus("Preview updated.");
+    } catch (MalikError& e) {
+        std::ostringstream oss;
+        oss << "Preview error (line " << e.line << "): " << e.what();
+        appendConsole(oss.str());
+        setStatus("Preview failed - see console for error.");
     } catch (std::exception& e) {
-        appendOutput("");
-        appendOutput(std::string("FATAL ERROR: ") + e.what());
-        setStatus(L"Run failed - fatal error");
+        appendConsole(std::string("Unexpected error: ") + e.what());
+        setStatus("Preview failed.");
     }
-}
-
-// ---------------------------------------------------------------------
-// File operations
-// ---------------------------------------------------------------------
-bool saveToPath(const std::wstring& path) {
-    std::string content = getEditorText();
-    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return false;
-    DWORD written = 0;
-    WriteFile(hFile, content.c_str(), (DWORD)content.size(), &written, NULL);
-    CloseHandle(hFile);
-    currentFilePath = path;
-    fileDirty = false;
-    updateTitle();
-    setStatus(L"Saved: " + path);
-    return true;
-}
-
-bool doSaveAs() {
-    wchar_t fileBuf[MAX_PATH] = L"";
-    OPENFILENAMEW ofn = { sizeof(OPENFILENAMEW) };
-    ofn.hwndOwner = hMainWnd;
-    ofn.lpstrFilter = L"MalikLang Files (*.z)\0*.z\0All Files (*.*)\0*.*\0";
-    ofn.lpstrFile = fileBuf;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = L"z";
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
-    if (GetSaveFileNameW(&ofn)) {
-        return saveToPath(fileBuf);
-    }
-    return false;
 }
 
 void doSave() {
-    if (currentFilePath.empty()) doSaveAs();
-    else saveToPath(currentFilePath);
+    wchar_t fileBuf[MAX_PATH] = L"";
+    if (!g_currentFilePath.empty()) {
+        size_t n = g_currentFilePath.size();
+        if (n > MAX_PATH - 1) n = MAX_PATH - 1;
+        for (size_t i = 0; i < n; i++) fileBuf[i] = g_currentFilePath[i];
+        fileBuf[n] = L'\0';
+    }
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_mainWnd;
+    ofn.lpstrFilter = L"MalikLang Files (*.z)\0*.z\0All Files\0*.*\0";
+    ofn.lpstrFile = fileBuf;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = L"z";
+    ofn.Flags = OFN_OVERWRITEPROMPT;
+
+    if (GetSaveFileNameW(&ofn)) {
+        std::string content = getEditorText();
+        HANDLE hFile = CreateFileW(fileBuf, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            DWORD written = 0;
+            WriteFile(hFile, content.c_str(), (DWORD)content.size(), &written, nullptr);
+            CloseHandle(hFile);
+            g_currentFilePath = fileBuf;
+            setStatus("Saved: " + wideToUtf8(g_currentFilePath));
+        } else {
+            MessageBoxW(g_mainWnd, L"Failed to save file.", L"Error", MB_OK | MB_ICONERROR);
+        }
+    }
 }
 
 void doOpen() {
     wchar_t fileBuf[MAX_PATH] = L"";
-    OPENFILENAMEW ofn = { sizeof(OPENFILENAMEW) };
-    ofn.hwndOwner = hMainWnd;
-    ofn.lpstrFilter = L"MalikLang Files (*.z)\0*.z\0All Files (*.*)\0*.*\0";
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_mainWnd;
+    ofn.lpstrFilter = L"MalikLang Files (*.z)\0*.z\0All Files\0*.*\0";
     ofn.lpstrFile = fileBuf;
     ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = L"z";
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-    if (GetOpenFileNameW(&ofn)) {
-        HANDLE hFile = CreateFileW(fileBuf, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            DWORD fileSize = GetFileSize(hFile, NULL);
-            std::string content(fileSize, 0);
-            DWORD bytesRead = 0;
-            ReadFile(hFile, &content[0], fileSize, &bytesRead, NULL);
-            content.resize(bytesRead);
-            CloseHandle(hFile);
+    ofn.Flags = OFN_FILEMUSTEXIST;
 
-            std::wstring wcontent = strToWstr(content);
-            SetWindowTextW(hCodeEdit, wcontent.c_str());
-            currentFilePath = fileBuf;
-            fileDirty = false;
-            updateTitle();
-            updateLineNumbers();
-            setStatus(L"Opened: " + currentFilePath);
+    if (GetOpenFileNameW(&ofn)) {
+        HANDLE hFile = CreateFileW(fileBuf, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            DWORD size = GetFileSize(hFile, nullptr);
+            std::string content(size, 0);
+            DWORD readBytes = 0;
+            ReadFile(hFile, &content[0], size, &readBytes, nullptr);
+            CloseHandle(hFile);
+            content.resize(readBytes);
+            std::wstring wcontent = utf8ToWide(content);
+            SetWindowTextW(g_editor, wcontent.c_str());
+            g_currentFilePath = fileBuf;
+            setStatus("Opened: " + wideToUtf8(g_currentFilePath));
+        } else {
+            MessageBoxW(g_mainWnd, L"Failed to open file.", L"Error", MB_OK | MB_ICONERROR);
         }
     }
 }
 
-void doNew() {
-    SetWindowTextW(hCodeEdit, L"");
-    currentFilePath = L"";
-    fileDirty = false;
-    updateTitle();
-    updateLineNumbers();
-    setStatus(L"New file");
+void layoutControls(int width, int height) {
+    int toolbarH = 40;
+    int statusH = 24;
+    int gap = 8;
+
+    int btnW = 90, btnH = 26;
+    int bx = gap;
+    MoveWindow(g_btnRun,     bx, 7, btnW, btnH, TRUE); bx += btnW + gap;
+    MoveWindow(g_btnPreview, bx, 7, btnW, btnH, TRUE); bx += btnW + gap;
+    MoveWindow(g_btnOpen,    bx, 7, btnW, btnH, TRUE); bx += btnW + gap;
+    MoveWindow(g_btnSave,    bx, 7, btnW, btnH, TRUE); bx += btnW + gap;
+
+    int contentTop = toolbarH;
+    int contentH = height - toolbarH - statusH;
+    if (contentH < 0) contentH = 0;
+    int halfW = (width - gap * 3) / 2;
+    if (halfW < 0) halfW = 0;
+
+    int editorH = (int)(contentH * 0.65);
+    int consoleH = contentH - editorH - gap;
+    if (consoleH < 0) consoleH = 0;
+
+    MoveWindow(g_editor, gap, contentTop, halfW, editorH, TRUE);
+    MoveWindow(g_console, gap, contentTop + editorH + gap, halfW, consoleH, TRUE);
+
+    int rightX = gap + halfW + gap;
+    MoveWindow(g_previewPanel, rightX, contentTop, halfW, contentH, TRUE);
+
+    MoveWindow(g_statusBar, 0, height - statusH, width, statusH, TRUE);
 }
 
-// ---------------------------------------------------------------------
-// Window subclass procedure for editor (to detect changes/scroll)
-// ---------------------------------------------------------------------
-WNDPROC originalEditProc;
-LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    LRESULT result = CallWindowProcW(originalEditProc, hwnd, msg, wp, lp);
-    if (msg == WM_KEYUP || msg == WM_CHAR) {
-        fileDirty = true;
-        updateTitle();
-        updateLineNumbers();
-    } else if (msg == WM_VSCROLL || msg == WM_MOUSEWHEEL) {
-        updateLineNumbers();
-    }
-    return result;
-}
-
-// ---------------------------------------------------------------------
-// Layout
-// ---------------------------------------------------------------------
-void doLayout(HWND hwnd) {
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    int width = rc.right - rc.left;
-    int height = rc.bottom - rc.top;
-
-    int statusH = 26;
-    int toolbarH = 44;
-    int gutterW = 44;
-    int margin = 10;
-
-    int editorAreaH = (int)((height - toolbarH - statusH - margin * 3) * 0.55);
-    int outputAreaH = height - toolbarH - statusH - editorAreaH - margin * 4;
-
-    int y = toolbarH + margin;
-
-    MoveWindow(hLineNumbers, margin, y, gutterW, editorAreaH, TRUE);
-    MoveWindow(hCodeEdit, margin + gutterW, y, width - margin * 2 - gutterW, editorAreaH, TRUE);
-
-    y += editorAreaH + margin;
-    MoveWindow(hOutputEdit, margin, y, width - margin * 2, outputAreaH, TRUE);
-
-    if (hStatusBar) MoveWindow(hStatusBar, 0, height - statusH, width, statusH, TRUE);
-
-    updateLineNumbers();
-}
-
-// ---------------------------------------------------------------------
-// Window Procedure
-// ---------------------------------------------------------------------
-HWND hRunBtn, hClearBtn, hNewBtn, hOpenBtn, hSaveBtn;
-
-LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
-            hCodeFont = CreateFontW(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                FIXED_PITCH | FF_MODERN, L"Consolas");
-            hUIFont = CreateFontW(16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            g_fontUI = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            g_fontMono = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_MODERN, L"Consolas");
 
-            hBgBrush = CreateSolidBrush(COLOR_BG);
-            hEditBgBrush = CreateSolidBrush(COLOR_EDIT_BG);
+            g_btnRun = CreateWindowExW(0, L"BUTTON", L"Run",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0,
+                hwnd, (HMENU)ID_BTN_RUN, GetModuleHandle(nullptr), nullptr);
 
-            // Toolbar buttons
-            hNewBtn = CreateWindowW(L"BUTTON", L"New", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                10, 8, 70, 30, hwnd, (HMENU)ID_MENU_NEW, NULL, NULL);
-            hOpenBtn = CreateWindowW(L"BUTTON", L"Open", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                85, 8, 70, 30, hwnd, (HMENU)ID_MENU_OPEN, NULL, NULL);
-            hSaveBtn = CreateWindowW(L"BUTTON", L"Save", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                160, 8, 70, 30, hwnd, (HMENU)ID_MENU_SAVE, NULL, NULL);
-            hRunBtn = CreateWindowW(L"BUTTON", L"\u25B6 Run (F5)", WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON,
-                250, 8, 120, 30, hwnd, (HMENU)ID_RUN_BTN, NULL, NULL);
-            hClearBtn = CreateWindowW(L"BUTTON", L"Clear Output", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                380, 8, 110, 30, hwnd, (HMENU)ID_CLEAR_BTN, NULL, NULL);
+            g_btnPreview = CreateWindowExW(0, L"BUTTON", L"Preview",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0,
+                hwnd, (HMENU)ID_BTN_PREVIEW, GetModuleHandle(nullptr), nullptr);
 
-            SendMessageW(hNewBtn, WM_SETFONT, (WPARAM)hUIFont, TRUE);
-            SendMessageW(hOpenBtn, WM_SETFONT, (WPARAM)hUIFont, TRUE);
-            SendMessageW(hSaveBtn, WM_SETFONT, (WPARAM)hUIFont, TRUE);
-            SendMessageW(hRunBtn, WM_SETFONT, (WPARAM)hUIFont, TRUE);
-            SendMessageW(hClearBtn, WM_SETFONT, (WPARAM)hUIFont, TRUE);
+            g_btnOpen = CreateWindowExW(0, L"BUTTON", L"Open",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0,
+                hwnd, (HMENU)ID_BTN_OPEN, GetModuleHandle(nullptr), nullptr);
 
-            // Line number gutter (read-only edit control)
-            hLineNumbers = CreateWindowExW(0, L"EDIT", L"1",
-                WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_RIGHT | ES_AUTOVSCROLL,
-                0, 0, 0, 0, hwnd, (HMENU)ID_LINENUMS, NULL, NULL);
-            SendMessageW(hLineNumbers, WM_SETFONT, (WPARAM)hCodeFont, TRUE);
+            g_btnSave = CreateWindowExW(0, L"BUTTON", L"Save",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0,
+                hwnd, (HMENU)ID_BTN_SAVE, GetModuleHandle(nullptr), nullptr);
 
-            // Code editor
-            std::wstring starterCode =
+            g_editor = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
+                0, 0, 0, 0, hwnd, (HMENU)ID_EDITOR, GetModuleHandle(nullptr), nullptr);
+
+            g_console = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+                0, 0, 0, 0, hwnd, (HMENU)ID_CONSOLE, GetModuleHandle(nullptr), nullptr);
+
+            // Preview panel: GUI controls get embedded into this when
+            // "Preview" is pressed, instead of opening a separate window.
+            g_previewPanel = CreateWindowExW(WS_EX_CLIENTEDGE, L"STATIC", L"",
+                WS_CHILD | WS_VISIBLE | SS_NOTIFY,
+                0, 0, 0, 0, hwnd, (HMENU)ID_PREVIEW_PANEL, GetModuleHandle(nullptr), nullptr);
+
+            g_statusBar = CreateWindowExW(0, STATUSCLASSNAMEW, L"Ready",
+                WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
+                hwnd, (HMENU)ID_STATUSBAR, GetModuleHandle(nullptr), nullptr);
+
+            SendMessageW(g_btnRun, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+            SendMessageW(g_btnPreview, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+            SendMessageW(g_btnOpen, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+            SendMessageW(g_btnSave, WM_SETFONT, (WPARAM)g_fontUI, TRUE);
+            SendMessageW(g_editor, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
+            SendMessageW(g_console, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
+
+            const wchar_t* sample =
                 L"// Welcome to MalikLang Studio\r\n"
-                L"// Write your .z code below and press Run (F5)\r\n\r\n"
-                L"let name = \"Mubashir\"\r\n"
-                L"print \"Hello, \" + name\r\n\r\n"
-                L"func add(a, b) {\r\n"
-                L"    return a + b\r\n"
-                L"}\r\n\r\n"
-                L"print add(10, 25)\r\n\r\n"
-                L"for (let i = 0; i < 5; i = i + 1) {\r\n"
-                L"    print \"Count: \" + str(i)\r\n"
+                L"// Press Run for text output, or Preview to see a live GUI here.\r\n\r\n"
+                L"window(\"My App\", 300, 300)\r\n"
+                L"label(\"Hello, World!\", 20, 20, 200, 25)\r\n"
+                L"button(\"Click Me\", 20, 60, 100, 35, \"onClick\")\r\n\r\n"
+                L"func onClick() {\r\n"
+                L"    print \"Button was clicked!\"\r\n"
                 L"}\r\n";
+            SetWindowTextW(g_editor, sample);
 
-            hCodeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", starterCode.c_str(),
-                WS_CHILD | WS_VISIBLE | ES_MULTILINE | WS_VSCROLL | WS_HSCROLL | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
-                0, 0, 0, 0, hwnd, (HMENU)ID_EDITOR, NULL, NULL);
-            SendMessageW(hCodeEdit, WM_SETFONT, (WPARAM)hCodeFont, TRUE);
-            SendMessageW(hCodeEdit, EM_SETLIMITTEXT, 1000000, 0);
-
-            originalEditProc = (WNDPROC)SetWindowLongPtrW(hCodeEdit, GWLP_WNDPROC, (LONG_PTR)EditSubclassProc);
-
-            // Output console
-            hOutputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | WS_VSCROLL | ES_AUTOVSCROLL,
-                0, 0, 0, 0, hwnd, (HMENU)ID_OUTPUT, NULL, NULL);
-            SendMessageW(hOutputEdit, WM_SETFONT, (WPARAM)hCodeFont, TRUE);
-
-            // Status bar
-            hStatusBar = CreateWindowExW(0, STATUSCLASSNAMEW, L"Ready",
-                WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, 0, 0, 0, hwnd, NULL, NULL, NULL);
-
-            appendOutput("MalikLang Studio v1.0 - ready. Write code and press Run.");
-
-            doLayout(hwnd);
-            break;
+            g_bgBrush = CreateSolidBrush(COL_BG);
+            g_panelBrush = CreateSolidBrush(COL_PANEL);
+            return 0;
         }
 
-        case WM_CTLCOLOREDIT: {
-            HDC hdc = (HDC)wp;
-            HWND ctrl = (HWND)lp;
-            if (ctrl == hOutputEdit) {
-                SetTextColor(hdc, COLOR_OUTPUT_FG);
-                SetBkColor(hdc, COLOR_OUTPUT_BG);
-                return (LRESULT)CreateSolidBrush(COLOR_OUTPUT_BG);
-            } else if (ctrl == hLineNumbers) {
-                SetTextColor(hdc, COLOR_LINENUM_FG);
-                SetBkColor(hdc, COLOR_LINENUM_BG);
-                return (LRESULT)CreateSolidBrush(COLOR_LINENUM_BG);
-            } else {
-                SetTextColor(hdc, COLOR_EDIT_FG);
-                SetBkColor(hdc, COLOR_EDIT_BG);
-                return (LRESULT)hEditBgBrush;
-            }
+        case WM_SIZE: {
+            int w = LOWORD(lParam), h = HIWORD(lParam);
+            layoutControls(w, h);
+            return 0;
         }
 
         case WM_CTLCOLORSTATIC:
-        case WM_CTLCOLORBTN: {
-            HDC hdc = (HDC)wp;
-            SetBkColor(hdc, COLOR_BG);
-            SetTextColor(hdc, COLOR_EDIT_FG);
-            return (LRESULT)hBgBrush;
+        case WM_CTLCOLOREDIT: {
+            HDC hdc = (HDC)wParam;
+            HWND ctrl = (HWND)lParam;
+            if (ctrl == g_console) {
+                SetTextColor(hdc, RGB(140, 220, 140));
+                SetBkColor(hdc, COL_EDITOR_BG);
+                return (LRESULT)g_panelBrush;
+            }
+            if (ctrl == g_editor) {
+                SetTextColor(hdc, COL_TEXT);
+                SetBkColor(hdc, COL_EDITOR_BG);
+                return (LRESULT)g_panelBrush;
+            }
+            SetTextColor(hdc, COL_TEXT);
+            SetBkColor(hdc, COL_BG);
+            return (LRESULT)g_bgBrush;
         }
 
         case WM_ERASEBKGND: {
-            HDC hdc = (HDC)wp;
-            RECT rc;
-            GetClientRect(hwnd, &rc);
-            FillRect(hdc, &rc, hBgBrush);
+            HDC hdc = (HDC)wParam;
+            RECT rc; GetClientRect(hwnd, &rc);
+            FillRect(hdc, &rc, g_bgBrush);
             return 1;
         }
 
-        case WM_SIZE:
-            doLayout(hwnd);
-            break;
-
         case WM_COMMAND: {
-            int id = LOWORD(wp);
-            if (id == ID_RUN_BTN || id == ID_MENU_RUN) runCode();
-            else if (id == ID_CLEAR_BTN || id == ID_MENU_CLEAR) clearOutput();
-            else if (id == ID_MENU_NEW) doNew();
-            else if (id == ID_MENU_OPEN) doOpen();
-            else if (id == ID_MENU_SAVE) doSave();
-            else if (id == ID_MENU_SAVEAS) doSaveAs();
-            else if (id == ID_MENU_EXIT) PostQuitMessage(0);
-            else if (id == ID_MENU_ABOUT)
-                MessageBoxW(hwnd, L"MalikLang Studio v1.0\n\nA personal programming language\nwith real lexer, parser & interpreter.\n\nFile format: .z",
-                    L"About MalikLang Studio", MB_OK | MB_ICONINFORMATION);
-            break;
-        }
+            int id = LOWORD(wParam);
+            if (id == ID_BTN_RUN) { doRun(); return 0; }
+            if (id == ID_BTN_PREVIEW) { doPreview(); return 0; }
+            if (id == ID_BTN_OPEN) { doOpen(); return 0; }
+            if (id == ID_BTN_SAVE) { doSave(); return 0; }
 
-        case WM_KEYDOWN:
-            if (wp == VK_F5) runCode();
-            break;
-
-        case WM_CLOSE:
-            if (fileDirty) {
-                int res = MessageBoxW(hwnd, L"You have unsaved changes. Save before closing?",
-                    L"MalikLang Studio", MB_YESNOCANCEL | MB_ICONWARNING);
-                if (res == IDYES) { doSave(); DestroyWindow(hwnd); }
-                else if (res == IDNO) DestroyWindow(hwnd);
-                // IDCANCEL: do nothing
-            } else {
-                DestroyWindow(hwnd);
+            // Forward clicks from controls created inside the preview
+            // panel (dynamic buttons made by the user's .z script) to
+            // the active preview interpreter's GUI runtime.
+            if (g_previewInterp) {
+                g_previewInterp->gui.fireClick(id);
             }
-            break;
+            return 0;
+        }
 
         case WM_DESTROY:
-            DeleteObject(hCodeFont);
-            DeleteObject(hUIFont);
-            DeleteObject(hBgBrush);
-            DeleteObject(hEditBgBrush);
+            if (g_bgBrush) DeleteObject(g_bgBrush);
+            if (g_panelBrush) DeleteObject(g_panelBrush);
+            if (g_fontUI) DeleteObject(g_fontUI);
+            if (g_fontMono) DeleteObject(g_fontMono);
             PostQuitMessage(0);
-            break;
-
-        default:
-            return DefWindowProcW(hwnd, msg, wp, lp);
+            return 0;
     }
-    return 0;
+    return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
-// ---------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------
-int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPSTR args, int nCmdShow) {
-    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES | ICC_STANDARD_CLASSES };
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
+    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES };
     InitCommonControlsEx(&icc);
 
-    WNDCLASSW wc = {0};
-    wc.lpfnWndProc = WindowProc;
-    wc.hInstance = hInst;
-    wc.lpszClassName = L"MalikLangStudioClass";
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = NULL; // we paint manually
-    wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hInstance;
+    wc.lpszClassName = L"MalikLangStudioWindow";
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = nullptr;
+    RegisterClassW(&wc);
 
-    if (!RegisterClassW(&wc)) return -1;
+    g_mainWnd = CreateWindowExW(
+        0, L"MalikLangStudioWindow", L"MalikLang Studio",
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1100, 720,
+        nullptr, nullptr, hInstance, nullptr
+    );
 
-    hMainWnd = CreateWindowExW(0, L"MalikLangStudioClass", L"MalikLang Studio - Untitled.z",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 900, 700,
-        NULL, NULL, hInst, NULL);
+    ShowWindow(g_mainWnd, nCmdShow);
+    UpdateWindow(g_mainWnd);
 
-    ShowWindow(hMainWnd, nCmdShow);
-    UpdateWindow(hMainWnd);
-
-    MSG msg = {0};
-    while (GetMessage(&msg, NULL, 0, 0)) {
-        if (msg.message == WM_KEYDOWN && msg.wParam == VK_F5) {
-            runCode();
-            continue;
-        }
+    MSG msg;
+    while (GetMessage(&msg, nullptr, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
